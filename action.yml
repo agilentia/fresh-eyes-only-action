@@ -1,0 +1,86 @@
+name: 'fresh eyes only'
+description: >
+  Dismisses approvals on PR synchronize events if code changes
+  are detected and the pusher is not exempt.
+author: 'Sherpany'
+branding:
+  icon: 'refresh-cw' # Example icon
+  color: 'yellow'    # Example color
+
+inputs:
+  github-token:
+    description: 'GitHub token with pull-requests:write permission.'
+    required: true
+  pr-number:
+    description: 'The number of the pull request.'
+    required: true
+  exempt-actors:
+    description: 'Comma-separated list of GitHub logins whose pushes should NOT trigger dismissal.'
+    required: false
+    default: ''
+  dismissal-message:
+    description: 'The message to use when dismissing the review.'
+    required: false
+    default: 'Approval dismissed: Changes detected since last approval.'
+
+runs:
+  using: 'composite'
+  steps:
+    # Step 1: Checkout the CALLER's repository code for git operations
+    # Needs full history for range-diff.
+    - name: Checkout Caller Repository Code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Crucial for git diff/range-diff operations
+
+    # Step 2: Ensure base branch history is available (Safety measure)
+    # Fetches the specific base ref to ensure range-diff has access to it.
+    - name: Fetch Base Branch History
+      shell: bash
+      run: |
+        echo "Fetching base branch ${{ github.event.pull_request.base.ref }} history..."
+        git fetch origin ${{ github.event.pull_request.base.ref }}:${{ github.event.pull_request.base.ref }}
+      env:
+        # Ensure the token used for fetch has read access if repo is private
+        # GITHUB_TOKEN usually suffices unless complex permissions are involved
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+
+    # Step 3: Checkout Action Code (to access the Python script)
+    # Check out this action's own repository content.
+    - name: Checkout Action Code
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.action_repository }} # Explicitly this action's repo
+        path: ./.github/actions/fresh-eyes-only-action # Store it in a defined sub-path
+
+    # Step 4: Set up Python environment
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # Step 5: Install Python dependencies (from the action's code)
+    - name: Install dependencies
+      shell: bash
+      run: pip install -r ./.github/actions/fresh-eyes-only-action/requirements.txt
+
+    # Step 6: Execute the smart dismissal script
+    - name: Check Conditions and Dismiss Approvals
+      shell: bash
+      env:
+        # --- Inputs passed directly to script ---
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        INPUT_DISMISSAL_MESSAGE: ${{ inputs.dismissal-message }}
+        INPUT_EXEMPT_ACTORS: ${{ inputs.exempt-actors }}
+
+        # --- Context needed for checks and API calls ---
+        GITHUB_EVENT_BEFORE_SHA: ${{ github.event.before }}
+        GITHUB_EVENT_AFTER_SHA: ${{ github.event.after }}
+        GITHUB_EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_REPOSITORY: ${{ github.repository }} # e.g., owner/repo
+        GITHUB_API_URL: ${{ github.api_url }}       # Base URL for API calls (handles GHES)
+
+      # Run the script located within the checked-out action code
+      run: python ./.github/actions/fresh-eyes-only-action/utils/dismiss_approvals.py
