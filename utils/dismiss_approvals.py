@@ -187,6 +187,12 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     """
     info("Checking for effective code changes...")
 
+    # Make sure we're in the caller's repository directory
+    # This is important because the action.yml checks out the caller's repo, but runs our script
+    # from the action's directory
+    caller_repo_dir = os.environ.get("GITHUB_WORKSPACE", ".")
+    debug(f"Working directory for git commands: {caller_repo_dir}")
+    
     # The correct format for git range-diff is: git range-diff <base> <rev1> <rev2>
     cmd = ["git", "range-diff", "--quiet", base_ref, before_sha, after_sha]
 
@@ -194,7 +200,12 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
 
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, check=False, timeout=60
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            check=False, 
+            timeout=60,
+            cwd=caller_repo_dir  # Run in the caller's repository directory
         )
         debug(f"Git exit code: {result.returncode}")
         debug(f"Git stdout: {result.stdout.strip() or '[empty]'}")
