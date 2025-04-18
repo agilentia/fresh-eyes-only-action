@@ -59,10 +59,10 @@ runs:
       with:
         python-version: '3.12'
 
-    # Step 5: Install Python dependencies (from the action's code)
+    # Step 5: Install Python dependencies directly
     - name: Install dependencies
       shell: bash
-      run: pip install -r ./.github/actions/fresh-eyes-only-action/requirements.txt
+      run: pip install httpx==0.28.1 click==8.1.8
 
     # Step 6: Execute the smart dismissal script
     - name: Check Conditions and Dismiss Approvals
