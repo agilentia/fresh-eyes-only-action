@@ -193,11 +193,29 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     caller_repo_dir = os.environ.get("GITHUB_WORKSPACE", ".")
     debug(f"Working directory for git commands: {caller_repo_dir}")
     
-    # The correct format for git range-diff is: git range-diff <base> <rev1> <rev2>
-    cmd = ["git", "range-diff", "--quiet", base_ref, before_sha, after_sha]
-
+    # First ensure the base_ref is fully resolved to a commit SHA
+    # This can help with detached HEAD states and reference resolution
+    resolve_cmd = ["git", "rev-parse", base_ref]
+    try:
+        resolve_result = subprocess.run(
+            resolve_cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            cwd=caller_repo_dir
+        )
+        resolved_base = resolve_result.stdout.strip()
+        debug(f"Resolved base_ref {base_ref} to SHA: {resolved_base}")
+        
+        # Now construct the range-diff command with the fully resolved SHA
+        cmd = ["git", "range-diff", "--quiet", resolved_base, before_sha, after_sha]
+    except Exception as e:
+        debug(f"Failed to resolve base_ref: {e}")
+        # Fall back to original command
+        cmd = ["git", "range-diff", "--quiet", base_ref, before_sha, after_sha]
+    
     debug(f"Running: {' '.join(cmd)}")
-
+    
     try:
         result = subprocess.run(
             cmd, 
