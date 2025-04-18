@@ -50,6 +50,7 @@ runs:
       uses: actions/checkout@v4
       with:
         repository: agilentia/fresh-eyes-only-action # The repo containing this action
+        ref: ${{ github.ref_name }} # Use the referenced branch/tag (main when using @main)
         path: ./.github/actions/fresh-eyes-only-action # Store it in a defined sub-path
 
     # Step 4: Set up Python environment
