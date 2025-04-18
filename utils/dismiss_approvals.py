@@ -182,72 +182,52 @@ class GitHubClient:
 
 def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bool:
     """
-    Check if there are effective code changes between commits using git range-diff
+    Check if there are effective code changes between commits
+    Uses GitHub API via gh CLI to reliably detect changes
     Returns True if changes exist, False otherwise
     """
     info("Checking for effective code changes...")
 
-    # Make sure we're in the caller's repository directory
-    # This is important because the action.yml checks out the caller's repo, but runs our script
-    # from the action's directory
-    caller_repo_dir = os.environ.get("GITHUB_WORKSPACE", ".")
-    debug(f"Working directory for git commands: {caller_repo_dir}")
+    # Get repository name from environment (always available in GitHub Actions)
+    repository = os.environ.get("GITHUB_REPOSITORY")
     
-    # First ensure the base_ref is fully resolved to a commit SHA
-    resolve_cmd = ["git", "rev-parse", base_ref]
-    try:
-        resolve_result = subprocess.run(
-            resolve_cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            cwd=caller_repo_dir
-        )
-        resolved_base = resolve_result.stdout.strip()
-        debug(f"Resolved base_ref {base_ref} to SHA: {resolved_base}")
-        
-        # Construct ranges with explicit base SHA
-        range1 = f"{resolved_base}..{before_sha}"
-        range2 = f"{resolved_base}..{after_sha}"
-        debug(f"Using explicit ranges: {range1} {range2}")
-        
-        # Use the explicit <base>..<rev1> <base>..<rev2> format
-        cmd = ["git", "range-diff", "--quiet", range1, range2]
-    except Exception as e:
-        debug(f"Failed to resolve base_ref: {e}")
-        # Fall back to simple format
-        cmd = ["git", "range-diff", "--quiet", base_ref, before_sha, after_sha]
-        debug("Falling back to simple format")
+    # Use GitHub API via gh CLI to compare commits
+    info("  Using GitHub API to compare commits")
     
-    debug(f"Running: {' '.join(cmd)}")
+    # The gh CLI will automatically use the GITHUB_TOKEN injected by GitHub Actions
+    compare_cmd = [
+        "gh", "api", 
+        f"repos/{repository}/compare/{before_sha}...{after_sha}",
+        "--jq", ".files"
+    ]
+    
+    debug(f"Running: {' '.join(compare_cmd)}")
     
     try:
         result = subprocess.run(
-            cmd, 
-            capture_output=True, 
-            text=True, 
-            check=False, 
-            timeout=60,
-            cwd=caller_repo_dir  # Run in the caller's repository directory
+            compare_cmd,
+            capture_output=True,
+            text=True,
+            check=False
         )
-        debug(f"Git exit code: {result.returncode}")
-        debug(f"Git stdout: {result.stdout.strip() or '[empty]'}")
-        debug(f"Git stderr: {result.stderr.strip() or '[empty]'}")
-
-        if result.returncode == GIT_DIFF_NO_CHANGES:
-            info("  No effective code changes detected")
-            return False
-        elif result.returncode == GIT_DIFF_HAS_CHANGES:
-            info("  Code changes detected")
-            return True
+        
+        if result.returncode == 0:
+            changed_files = result.stdout.strip()
+            if changed_files and changed_files != "[]":
+                info(f"  Changes detected between commits via GitHub API")
+                debug(f"  Changed files data: {changed_files}")
+                return True
+            else:
+                info("  No changes detected between commits via GitHub API")
+                return False
         else:
-            error(f"  Git range-diff failed with exit code {result.returncode}")
-            warning("  Assuming changes exist as a precaution")
+            error(f"  GitHub API error: {result.stderr}")
+            # Don't fall back, just assume changes exist as a precaution
+            warning("  GitHub API call failed, assuming changes exist as a precaution")
             return True
-
     except Exception as e:
-        error(f"  Error running git command: {e}")
-        warning("  Assuming changes exist as a precaution")
+        error(f"  Error using GitHub API: {e}")
+        warning("  GitHub API error, assuming changes exist as a precaution")
         return True
 
 
@@ -371,11 +351,6 @@ def main(
         info(f"✓ Actor '{actor}' is exempt, skipping approval dismissal")
         sys.exit(EXIT_SUCCESS)
 
-    # Check for effective code changes
-    if not check_for_code_changes(base_ref, before_sha, after_sha):
-        info("✓ No effective code changes, no need to dismiss approvals")
-        sys.exit(EXIT_SUCCESS)
-
     # Initialize GitHub client
     client = GitHubClient(
         token=github_token,
@@ -395,6 +370,11 @@ def main(
 
     if not approved_ids:
         info("✓ No approvals to dismiss")
+        sys.exit(EXIT_SUCCESS)
+
+    # Check for effective code changes
+    if not check_for_code_changes(base_ref, before_sha, after_sha):
+        info("✓ No effective code changes, no need to dismiss approvals")
         sys.exit(EXIT_SUCCESS)
 
     # Dismiss reviews
