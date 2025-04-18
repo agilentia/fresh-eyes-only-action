@@ -194,7 +194,6 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     debug(f"Working directory for git commands: {caller_repo_dir}")
     
     # First ensure the base_ref is fully resolved to a commit SHA
-    # This can help with detached HEAD states and reference resolution
     resolve_cmd = ["git", "rev-parse", base_ref]
     try:
         resolve_result = subprocess.run(
@@ -207,12 +206,18 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         resolved_base = resolve_result.stdout.strip()
         debug(f"Resolved base_ref {base_ref} to SHA: {resolved_base}")
         
-        # Now construct the range-diff command with the fully resolved SHA
-        cmd = ["git", "range-diff", "--quiet", resolved_base, before_sha, after_sha]
+        # Construct ranges with explicit base SHA
+        range1 = f"{resolved_base}..{before_sha}"
+        range2 = f"{resolved_base}..{after_sha}"
+        debug(f"Using explicit ranges: {range1} {range2}")
+        
+        # Use the explicit <base>..<rev1> <base>..<rev2> format
+        cmd = ["git", "range-diff", "--quiet", range1, range2]
     except Exception as e:
         debug(f"Failed to resolve base_ref: {e}")
-        # Fall back to original command
+        # Fall back to simple format
         cmd = ["git", "range-diff", "--quiet", base_ref, before_sha, after_sha]
+        debug("Falling back to simple format")
     
     debug(f"Running: {' '.join(cmd)}")
     
