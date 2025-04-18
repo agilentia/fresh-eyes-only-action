@@ -63,6 +63,8 @@ runs:
     - name: Check Conditions and Dismiss Approvals
       shell: bash
       env:
+        GH_TOKEN: ${{ github.token }}
+
         # --- Inputs passed directly to script ---
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
         INPUT_PR_NUMBER: ${{ inputs.pr-number }}
