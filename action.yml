@@ -45,12 +45,11 @@ runs:
         # GITHUB_TOKEN usually suffices unless complex permissions are involved
         GITHUB_TOKEN: ${{ inputs.github-token }}
 
-    # Step 3: Checkout Action Code (to access the Python script)
-    # Check out this action's own repository content.
-    - name: Checkout Action Code
+    # Step 3: Checkout Action Code (this repository)
+    - name: Checkout Action Repository
       uses: actions/checkout@v4
       with:
-        repository: ${{ github.action_repository }} # Explicitly this action's repo
+        repository: agilentia/fresh-eyes-only-action # The repo containing this action
         path: ./.github/actions/fresh-eyes-only-action # Store it in a defined sub-path
 
     # Step 4: Set up Python environment
