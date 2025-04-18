@@ -151,8 +151,7 @@ class GitHubClient:
                 error("Failed to fetch reviews")
                 return []
 
-        # Clean up resources
-        self.client.close()
+        # Don't close the client here - it's needed for dismiss_review
         return list(set(approved_ids))  # Remove any duplicates
 
     def dismiss_review(self, review_id: int) -> bool:
