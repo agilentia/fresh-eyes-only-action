@@ -187,9 +187,8 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     """
     info("Checking for effective code changes...")
 
-    range1 = f"{base_ref}...{before_sha}"
-    range2 = f"{base_ref}...{after_sha}"
-    cmd = ["git", "range-diff", "--quiet", range1, range2]
+    # The correct format for git range-diff is: git range-diff <base> <rev1> <rev2>
+    cmd = ["git", "range-diff", "--quiet", base_ref, before_sha, after_sha]
 
     debug(f"Running: {' '.join(cmd)}")
 
