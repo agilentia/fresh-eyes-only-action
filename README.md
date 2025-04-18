@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Dismiss approvals on change
-        uses: agilentia/fresh-eyes-only@v1 # <-- UPDATE THIS
+        uses: agilentia/fresh-eyes-only-action@main
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           pr-number: ${{ github.event.pull_request.number }}
