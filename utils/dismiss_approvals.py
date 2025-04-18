@@ -195,10 +195,12 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     info("  Using GitHub API to compare commits")
     
     # The gh CLI will automatically use the GITHUB_TOKEN injected by GitHub Actions
+    # For squashed commits, we need to be more precise and check for actual content changes
+    # Use a JQ query that captures files with actual content changes, filtering out status changes
     compare_cmd = [
         "gh", "api", 
         f"repos/{repository}/compare/{before_sha}...{after_sha}",
-        "--jq", ".files"
+        "--jq", '.files[] | select(.status == "modified" or .status == "added" or .status == "removed") | .filename'
     ]
     
     debug(f"Running: {' '.join(compare_cmd)}")
@@ -213,12 +215,13 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         
         if result.returncode == 0:
             changed_files = result.stdout.strip()
-            if changed_files and changed_files != "[]":
-                info(f"  Changes detected between commits via GitHub API")
-                debug(f"  Changed files data: {changed_files}")
+            if changed_files:
+                info(f"  Content changes detected between commits via GitHub API")
+                debug(f"  Changed files: {changed_files}")
                 return True
             else:
-                info("  No changes detected between commits via GitHub API")
+                info("  No content changes detected between commits via GitHub API")
+                debug("  Commit history changes only (e.g., squash) - no need to dismiss approvals")
                 return False
         else:
             error(f"  GitHub API error: {result.stderr}")
