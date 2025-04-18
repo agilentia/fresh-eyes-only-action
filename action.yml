@@ -45,13 +45,8 @@ runs:
         # GITHUB_TOKEN usually suffices unless complex permissions are involved
         GITHUB_TOKEN: ${{ inputs.github-token }}
 
-    # Step 3: Checkout Action Code (this repository)
-    - name: Checkout Action Repository
-      uses: actions/checkout@v4
-      with:
-        repository: agilentia/fresh-eyes-only-action # The repo containing this action
-        ref: ${{ github.ref_name }} # Use the referenced branch/tag (main when using @main)
-        path: ./.github/actions/fresh-eyes-only-action # Store it in a defined sub-path
+    # Step 3 removed: No need to checkout the action repository
+    # When an action is referenced, its files are available directly
 
     # Step 4: Set up Python environment
     - name: Set up Python
@@ -82,5 +77,5 @@ runs:
         GITHUB_REPOSITORY: ${{ github.repository }} # e.g., owner/repo
         GITHUB_API_URL: ${{ github.api_url }}       # Base URL for API calls (handles GHES)
 
-      # Run the script located within the checked-out action code
-      run: python ./.github/actions/fresh-eyes-only-action/utils/dismiss_approvals.py
+      # Run the script directly from the action's files
+      run: python ${{ github.action_path }}/utils/dismiss_approvals.py
