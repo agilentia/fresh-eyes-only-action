@@ -180,6 +180,115 @@ class GitHubClient:
             return False
 
 
+def run_gh_api_command(cmd: List[str]) -> Optional[str]:
+    """
+    Run a GitHub API command via gh CLI and return the result
+    Returns None if command fails
+    """
+    debug(f"Running command: {' '.join(cmd)}")
+    
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        
+        if result.returncode == 0:
+            return result.stdout.strip()
+        else:
+            error(f"  GitHub API error: {result.stderr}")
+            return None
+    except Exception as e:
+        error(f"  Error running GitHub API command: {e}")
+        return None
+
+
+def get_comparison_status(repository: str, before_sha: str, after_sha: str) -> Optional[str]:
+    """
+    Get the comparison status between two commits
+    Returns status string (identical, behind, ahead, diverged) or None if check fails
+    """
+    status_cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/compare/{before_sha}...{after_sha}",
+        "--jq",
+        ".status",
+    ]
+    
+    status = run_gh_api_command(status_cmd)
+    
+    if status:
+        debug(f"  Compare status: '{status}'")
+    
+    return status
+
+
+def compare_tree_shas(repository: str, before_sha: str, after_sha: str) -> Optional[bool]:
+    """
+    Compare tree SHAs between two commits
+    Returns True if different (changes exist), False if identical, None if check fails
+    """
+    debug("  Comparing tree SHAs")
+    
+    # Get tree SHA for before commit
+    before_tree_cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/git/commits/{before_sha}",
+        "--jq",
+        ".tree.sha",
+    ]
+    
+    # Get tree SHA for after commit
+    after_tree_cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/git/commits/{after_sha}",
+        "--jq",
+        ".tree.sha",
+    ]
+    
+    before_tree_sha = run_gh_api_command(before_tree_cmd)
+    after_tree_sha = run_gh_api_command(after_tree_cmd)
+    
+    if before_tree_sha and after_tree_sha:
+        debug(f"  Before tree SHA: {before_tree_sha}")
+        debug(f"  After tree SHA: {after_tree_sha}")
+        
+        return before_tree_sha != after_tree_sha
+    
+    return None
+
+
+def check_file_changes(repository: str, before_sha: str, after_sha: str) -> bool:
+    """
+    Check for file changes between commits
+    Returns True if changes exist, False otherwise
+    Falls back to assuming changes exist if checks fail
+    """
+    debug("  Checking for file changes")
+    
+    files_cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/compare/{before_sha}...{after_sha}",
+        "--jq",
+        '.files[] | select(.status == "modified" or .status == "added" or .status == "removed") | .filename',
+    ]
+    
+    changed_files = run_gh_api_command(files_cmd)
+    
+    if changed_files is not None:
+        if changed_files:
+            info(f"  Content changes detected via file list")
+            debug(f"  Changed files: {changed_files}")
+            return True
+        else:
+            info("  No file changes detected")
+            return False
+    
+    warning("  GitHub API call failed, assuming changes exist as a precaution")
+    return True
+
+
 def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bool:
     """
     Check if there are effective code changes between commits
@@ -187,51 +296,45 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     Returns True if changes exist, False otherwise
     """
     info("Checking for effective code changes...")
-
+    
     # Get repository name from environment (always available in GitHub Actions)
     repository = os.environ.get("GITHUB_REPOSITORY")
     
     # Use GitHub API via gh CLI to compare commits
     info("  Using GitHub API to compare commits")
     
-    # The gh CLI will automatically use the GITHUB_TOKEN injected by GitHub Actions
-    # For squashed commits, we need to be more precise and check for actual content changes
-    # Use a JQ query that captures files with actual content changes, filtering out status changes
-    compare_cmd = [
-        "gh", "api", 
-        f"repos/{repository}/compare/{before_sha}...{after_sha}",
-        "--jq", '.files[] | select(.status == "modified" or .status == "added" or .status == "removed") | .filename'
-    ]
+    # First check the status of the comparison - this helps distinguish different cases
+    status = get_comparison_status(repository, before_sha, after_sha)
     
-    debug(f"Running: {' '.join(compare_cmd)}")
-    
-    try:
-        result = subprocess.run(
-            compare_cmd,
-            capture_output=True,
-            text=True,
-            check=False
-        )
-        
-        if result.returncode == 0:
-            changed_files = result.stdout.strip()
-            if changed_files:
-                info(f"  Content changes detected between commits via GitHub API")
-                debug(f"  Changed files: {changed_files}")
-                return True
-            else:
-                info("  No content changes detected between commits via GitHub API")
-                debug("  Commit history changes only (e.g., squash) - no need to dismiss approvals")
+    if status:
+        # Handle different status cases using match/case pattern matching
+        match status:
+            case "identical" | "behind":
+                # If identical or behind, there are no content changes
+                info(f"  No changes detected - compare status is '{status}'")
                 return False
-        else:
-            error(f"  GitHub API error: {result.stderr}")
-            # Don't fall back, just assume changes exist as a precaution
-            warning("  GitHub API call failed, assuming changes exist as a precaution")
-            return True
-    except Exception as e:
-        error(f"  Error using GitHub API: {e}")
-        warning("  GitHub API error, assuming changes exist as a precaution")
-        return True
+                
+            case "diverged":
+                # For diverged branches, we need to compare the tree SHAs
+                tree_comparison = compare_tree_shas(repository, before_sha, after_sha)
+                
+                if tree_comparison is not None:
+                    if tree_comparison:
+                        info("  Changes detected - tree SHAs differ")
+                    else:
+                        info("  No changes detected - tree SHAs are identical")
+                        return False
+                        
+            case "ahead":
+                # If ahead, check for actual file changes
+                debug("  Status is 'ahead', checking for file changes")
+                
+            case _:
+                # Default case - any other status
+                debug(f"  Unhandled status '{status}', checking file changes")
+    
+    # Fallback or status == "ahead" or any other case - check for actual file changes
+    return check_file_changes(repository, before_sha, after_sha)
 
 
 def parse_repository(repo_string: str) -> Optional[Tuple[str, str]]:
@@ -268,7 +371,7 @@ def parse_exempt_actors(actors_string: str) -> Set[str]:
 @click.option(
     "--exempt-actors",
     envvar="INPUT_EXEMPT_ACTORS",
-    default="",
+    default="SherpanyDevOps",
     help="Comma-separated list of exempt actors",
 )
 @click.option(
