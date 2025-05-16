@@ -3,6 +3,7 @@
 GitHub Action: Smart PR Approval Dismissal
 Automatically dismisses stale PR approvals when code changes are detected.
 """
+import hashlib
 import os
 import sys
 import subprocess
@@ -221,72 +222,17 @@ def get_comparison_status(repository: str, before_sha: str, after_sha: str) -> O
     return status
 
 
-def compare_tree_shas(repository: str, before_sha: str, after_sha: str) -> Optional[bool]:
-    """
-    Compare tree SHAs between two commits
-    Returns True if different (changes exist), False if identical, None if check fails
-    """
-    debug("  Comparing tree SHAs")
-    
-    # Get tree SHA for before commit
-    before_tree_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/git/commits/{before_sha}",
-        "--jq",
-        ".tree.sha",
-    ]
-    
-    # Get tree SHA for after commit
-    after_tree_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/git/commits/{after_sha}",
-        "--jq",
-        ".tree.sha",
-    ]
-    
-    before_tree_sha = run_gh_api_command(before_tree_cmd)
-    after_tree_sha = run_gh_api_command(after_tree_cmd)
-    
-    if before_tree_sha and after_tree_sha:
-        debug(f"  Before tree SHA: {before_tree_sha}")
-        debug(f"  After tree SHA: {after_tree_sha}")
-        
-        return before_tree_sha != after_tree_sha
-    
-    return None
+def get_normalized_hash(text: str | None) -> str:
+    """Return a SHA-256 hash of the filtered lines, handling None and empty input."""
+    if not text:
+        text = ""  # Treat None or empty as empty string
 
-
-def check_file_changes(repository: str, before_sha: str, after_sha: str) -> bool:
-    """
-    Check for file changes between commits
-    Returns True if changes exist, False otherwise
-    Falls back to assuming changes exist if checks fail
-    """
-    debug("  Checking for file changes")
-    
-    files_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{before_sha}...{after_sha}",
-        "--jq",
-        '.files[] | select(.status == "modified" or .status == "added" or .status == "removed") | .filename',
-    ]
-    
-    changed_files = run_gh_api_command(files_cmd)
-    
-    if changed_files is not None:
-        if changed_files:
-            info(f"  Content changes detected via file list")
-            debug(f"  Changed files: {changed_files}")
-            return True
-        else:
-            info("  No file changes detected")
-            return False
-    
-    warning("  GitHub API call failed, assuming changes exist as a precaution")
-    return True
+    hasher = hashlib.sha256()
+    for line in text.splitlines():
+        # ignore meta like hunk allocation
+        if not (line.startswith('@@') or line.startswith('+++') or line.startswith('---')):
+            hasher.update((line + '\n').encode('utf-8'))
+    return hasher.hexdigest()
 
 
 def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bool:
@@ -392,7 +338,7 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         return True
     
     # If the diffs are identical, no changes
-    if before_diff_details == after_diff_details:
+    if get_normalized_hash(before_diff_details) == get_normalized_hash(after_diff_details):
         info("  No changes detected - identical diffs compared to main branch")
         return False
     
