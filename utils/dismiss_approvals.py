@@ -4,13 +4,14 @@ GitHub Action: Smart PR Approval Dismissal
 Automatically dismisses stale PR approvals when code changes are detected.
 """
 import hashlib
-import os
-import sys
-import subprocess
 import logging
-from typing import List, Set, Optional, Tuple
-import httpx
+import os
+import subprocess
+import sys
+from typing import List, Optional, Set, Tuple
+
 import click
+import httpx
 
 # Constants
 GITHUB_API_VERSION = "2022-11-28"
@@ -187,10 +188,10 @@ def run_gh_api_command(cmd: List[str]) -> Optional[str]:
     Returns None if command fails
     """
     debug(f"Running command: {' '.join(cmd)}")
-    
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        
+
         if result.returncode == 0:
             return result.stdout.strip()
         else:
@@ -201,7 +202,9 @@ def run_gh_api_command(cmd: List[str]) -> Optional[str]:
         return None
 
 
-def get_comparison_status(repository: str, before_sha: str, after_sha: str) -> Optional[str]:
+def get_comparison_status(
+    repository: str, before_sha: str, after_sha: str
+) -> Optional[str]:
     """
     Get the comparison status between two commits
     Returns status string (identical, behind, ahead, diverged) or None if check fails
@@ -213,12 +216,12 @@ def get_comparison_status(repository: str, before_sha: str, after_sha: str) -> O
         "--jq",
         ".status",
     ]
-    
+
     status = run_gh_api_command(status_cmd)
-    
+
     if status:
         debug(f"  Compare status: '{status}'")
-    
+
     return status
 
 
@@ -230,8 +233,10 @@ def get_normalized_hash(text: str | None) -> str:
     hasher = hashlib.sha256()
     for line in text.splitlines():
         # ignore meta like hunk allocation
-        if not (line.startswith('@@') or line.startswith('+++') or line.startswith('---')):
-            hasher.update((line + '\n').encode('utf-8'))
+        if not (
+            line.startswith("@@") or line.startswith("+++") or line.startswith("---")
+        ):
+            hasher.update((line + "\n").encode("utf-8"))
     return hasher.hexdigest()
 
 
@@ -242,63 +247,63 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     Returns True if changes exist, False otherwise
     """
     info("Checking for effective code changes...")
-    
+
     # Get repository name from environment (always available in GitHub Actions)
     repository = os.environ.get("GITHUB_REPOSITORY")
-    
+
     # Use GitHub API via gh CLI to compare deltas with main branch
     info("  Using GitHub API to compare deltas with main branch")
-    
+
     # Get main branch SHA
     main_sha_cmd = [
-        "gh", 
-        "api", 
+        "gh",
+        "api",
         f"repos/{repository}/git/refs/heads/{base_ref}",
         "--jq",
-        ".object.sha"
+        ".object.sha",
     ]
-    
+
     main_sha = run_gh_api_command(main_sha_cmd)
-    
+
     if not main_sha:
         warning(f"  Could not get main branch SHA, assuming changes exist")
         return True
-    
+
     debug(f"  Main branch SHA: {main_sha}")
-    
+
     # Compare the diff between main and before_sha
     before_diff_cmd = [
         "gh",
         "api",
         f"repos/{repository}/compare/{main_sha}...{before_sha}",
         "--jq",
-        ".files[].filename"
+        ".files[].filename",
     ]
-    
+
     # Compare the diff between main and after_sha
     after_diff_cmd = [
         "gh",
         "api",
         f"repos/{repository}/compare/{main_sha}...{after_sha}",
         "--jq",
-        ".files[].filename"
+        ".files[].filename",
     ]
-    
+
     before_files = run_gh_api_command(before_diff_cmd)
     after_files = run_gh_api_command(after_diff_cmd)
-    
+
     # If either call failed, assume changes exist as a precaution
     if before_files is None or after_files is None:
         warning("  GitHub API call failed, assuming changes exist as a precaution")
         return True
-    
+
     # Convert to sets for comparison
     before_set = set(before_files.splitlines() if before_files else [])
     after_set = set(after_files.splitlines() if after_files else [])
-    
+
     debug(f"  Files changed in before commit: {len(before_set)}")
     debug(f"  Files changed in after commit: {len(after_set)}")
-    
+
     # If the sets are different, there are changes
     if before_set != after_set:
         info("  Changes detected - different files modified compared to main branch")
@@ -310,7 +315,7 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         if removed:
             debug(f"  Files only in before commit: {removed}")
         return True
-    
+
     # Even if the same files are affected, check the content changes
     # Get detailed diffs to compare actual content changes
     before_diff_details_cmd = [
@@ -318,30 +323,34 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         "api",
         f"repos/{repository}/compare/{main_sha}...{before_sha}",
         "--jq",
-        ".files[].patch"
+        ".files[].patch",
     ]
-    
+
     after_diff_details_cmd = [
         "gh",
         "api",
         f"repos/{repository}/compare/{main_sha}...{after_sha}",
         "--jq",
-        ".files[].patch"
+        ".files[].patch",
     ]
-    
+
     before_diff_details = run_gh_api_command(before_diff_details_cmd)
     after_diff_details = run_gh_api_command(after_diff_details_cmd)
-    
+
     # If either call failed, assume changes exist as a precaution
     if before_diff_details is None or after_diff_details is None:
-        warning("  GitHub API call failed when checking diff details, assuming changes exist")
+        warning(
+            "  GitHub API call failed when checking diff details, assuming changes exist"
+        )
         return True
-    
+
     # If the diffs are identical, no changes
-    if get_normalized_hash(before_diff_details) == get_normalized_hash(after_diff_details):
+    if get_normalized_hash(before_diff_details) == get_normalized_hash(
+        after_diff_details
+    ):
         info("  No changes detected - identical diffs compared to main branch")
         return False
-    
+
     info("  Changes detected - different diff content compared to main branch")
     return True
 
