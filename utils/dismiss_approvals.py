@@ -233,9 +233,7 @@ def get_normalized_hash(text: str | None) -> str:
     hasher = hashlib.sha256()
     for line in text.splitlines():
         # ignore meta like hunk allocation
-        if not (
-            line.startswith("@@") or line.startswith("+++") or line.startswith("---")
-        ):
+        if not line.startswith(("@@", "+++", "---")):
             hasher.update((line + "\n").encode("utf-8"))
     return hasher.hexdigest()
 
