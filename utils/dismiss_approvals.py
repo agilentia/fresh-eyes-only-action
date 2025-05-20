@@ -8,7 +8,7 @@ import logging
 import os
 import subprocess
 import sys
-from typing import List, Optional, Set, Tuple
+from typing import Any
 
 import click
 import httpx
@@ -92,7 +92,7 @@ class GitHubClient:
         }
         return httpx.Client(headers=headers, timeout=30.0)
 
-    def _api_request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
+    def _api_request(self, method: str, endpoint: str, **kwargs: Any) -> httpx.Response:
         """Make an API request and handle errors consistently"""
         url = f"{self.api_url}{endpoint}"
         debug(f"API Request: {method} {url}")
@@ -113,7 +113,7 @@ class GitHubClient:
             error(f"API Error: {method} {url} - {e}")
             raise
 
-    def get_approved_reviews(self) -> List[int]:
+    def get_approved_reviews(self) -> list[int]:
         """Fetch all approved reviews for the PR"""
         endpoint = f"/repos/{self.owner}/{self.repo}/pulls/{self.pr_number}/reviews"
         info(f"Fetching approved reviews for PR #{self.pr_number}...")
@@ -182,7 +182,7 @@ class GitHubClient:
             return False
 
 
-def run_gh_api_command(cmd: List[str]) -> Optional[str]:
+def run_gh_api_command(cmd: list[str]) -> str | None:
     """
     Run a GitHub API command via gh CLI and return the result
     Returns None if command fails
@@ -204,7 +204,7 @@ def run_gh_api_command(cmd: List[str]) -> Optional[str]:
 
 def get_comparison_status(
     repository: str, before_sha: str, after_sha: str
-) -> Optional[str]:
+) -> str | None:
     """
     Get the comparison status between two commits
     Returns status string (identical, behind, ahead, diverged) or None if check fails
@@ -264,7 +264,7 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     main_sha = run_gh_api_command(main_sha_cmd)
 
     if not main_sha:
-        warning(f"  Could not get main branch SHA, assuming changes exist")
+        warning("  Could not get main branch SHA, assuming changes exist")
         return True
 
     debug(f"  Main branch SHA: {main_sha}")
@@ -353,16 +353,15 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     return True
 
 
-def parse_repository(repo_string: str) -> Optional[Tuple[str, str]]:
+def parse_repository(repo_string: str) -> tuple[str, str] | None:
     """Parse repository string in format 'owner/repo'"""
     parts = repo_string.split("/", 1)
     if len(parts) == 2 and parts[0] and parts[1]:
         return parts[0], parts[1]
     error(f"Invalid repository format: {repo_string}")
-    return None
 
 
-def parse_exempt_actors(actors_string: str) -> Set[str]:
+def parse_exempt_actors(actors_string: str) -> set[str]:
     """Parse comma-separated list of exempt actors"""
     if not actors_string:
         return set()
