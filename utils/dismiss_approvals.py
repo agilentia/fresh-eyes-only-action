@@ -3,13 +3,15 @@
 GitHub Action: Smart PR Approval Dismissal
 Automatically dismisses stale PR approvals when code changes are detected.
 """
-import os
-import sys
-import subprocess
+import hashlib
 import logging
-from typing import List, Set, Optional, Tuple
-import httpx
+import os
+import subprocess
+import sys
+from typing import Any
+
 import click
+import httpx
 
 # Constants
 GITHUB_API_VERSION = "2022-11-28"
@@ -90,7 +92,7 @@ class GitHubClient:
         }
         return httpx.Client(headers=headers, timeout=30.0)
 
-    def _api_request(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
+    def _api_request(self, method: str, endpoint: str, **kwargs: Any) -> httpx.Response:
         """Make an API request and handle errors consistently"""
         url = f"{self.api_url}{endpoint}"
         debug(f"API Request: {method} {url}")
@@ -111,7 +113,7 @@ class GitHubClient:
             error(f"API Error: {method} {url} - {e}")
             raise
 
-    def get_approved_reviews(self) -> List[int]:
+    def get_approved_reviews(self) -> list[int]:
         """Fetch all approved reviews for the PR"""
         endpoint = f"/repos/{self.owner}/{self.repo}/pulls/{self.pr_number}/reviews"
         info(f"Fetching approved reviews for PR #{self.pr_number}...")
@@ -180,16 +182,16 @@ class GitHubClient:
             return False
 
 
-def run_gh_api_command(cmd: List[str]) -> Optional[str]:
+def run_gh_api_command(cmd: list[str]) -> str | None:
     """
     Run a GitHub API command via gh CLI and return the result
     Returns None if command fails
     """
     debug(f"Running command: {' '.join(cmd)}")
-    
+
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        
+
         if result.returncode == 0:
             return result.stdout.strip()
         else:
@@ -200,7 +202,9 @@ def run_gh_api_command(cmd: List[str]) -> Optional[str]:
         return None
 
 
-def get_comparison_status(repository: str, before_sha: str, after_sha: str) -> Optional[str]:
+def get_comparison_status(
+    repository: str, before_sha: str, after_sha: str
+) -> str | None:
     """
     Get the comparison status between two commits
     Returns status string (identical, behind, ahead, diverged) or None if check fails
@@ -212,81 +216,26 @@ def get_comparison_status(repository: str, before_sha: str, after_sha: str) -> O
         "--jq",
         ".status",
     ]
-    
+
     status = run_gh_api_command(status_cmd)
-    
+
     if status:
         debug(f"  Compare status: '{status}'")
-    
+
     return status
 
 
-def compare_tree_shas(repository: str, before_sha: str, after_sha: str) -> Optional[bool]:
-    """
-    Compare tree SHAs between two commits
-    Returns True if different (changes exist), False if identical, None if check fails
-    """
-    debug("  Comparing tree SHAs")
-    
-    # Get tree SHA for before commit
-    before_tree_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/git/commits/{before_sha}",
-        "--jq",
-        ".tree.sha",
-    ]
-    
-    # Get tree SHA for after commit
-    after_tree_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/git/commits/{after_sha}",
-        "--jq",
-        ".tree.sha",
-    ]
-    
-    before_tree_sha = run_gh_api_command(before_tree_cmd)
-    after_tree_sha = run_gh_api_command(after_tree_cmd)
-    
-    if before_tree_sha and after_tree_sha:
-        debug(f"  Before tree SHA: {before_tree_sha}")
-        debug(f"  After tree SHA: {after_tree_sha}")
-        
-        return before_tree_sha != after_tree_sha
-    
-    return None
+def get_normalized_hash(text: str | None) -> str:
+    """Return a SHA-256 hash of the filtered lines, handling None and empty input."""
+    if not text:
+        text = ""  # Treat None or empty as empty string
 
-
-def check_file_changes(repository: str, before_sha: str, after_sha: str) -> bool:
-    """
-    Check for file changes between commits
-    Returns True if changes exist, False otherwise
-    Falls back to assuming changes exist if checks fail
-    """
-    debug("  Checking for file changes")
-    
-    files_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{before_sha}...{after_sha}",
-        "--jq",
-        '.files[] | select(.status == "modified" or .status == "added" or .status == "removed") | .filename',
-    ]
-    
-    changed_files = run_gh_api_command(files_cmd)
-    
-    if changed_files is not None:
-        if changed_files:
-            info(f"  Content changes detected via file list")
-            debug(f"  Changed files: {changed_files}")
-            return True
-        else:
-            info("  No file changes detected")
-            return False
-    
-    warning("  GitHub API call failed, assuming changes exist as a precaution")
-    return True
+    hasher = hashlib.sha256()
+    for line in text.splitlines():
+        # ignore meta like hunk allocation
+        if not line.startswith(("@@", "+++", "---")):
+            hasher.update((line + "\n").encode("utf-8"))
+    return hasher.hexdigest()
 
 
 def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bool:
@@ -296,63 +245,63 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     Returns True if changes exist, False otherwise
     """
     info("Checking for effective code changes...")
-    
+
     # Get repository name from environment (always available in GitHub Actions)
     repository = os.environ.get("GITHUB_REPOSITORY")
-    
+
     # Use GitHub API via gh CLI to compare deltas with main branch
     info("  Using GitHub API to compare deltas with main branch")
-    
+
     # Get main branch SHA
     main_sha_cmd = [
-        "gh", 
-        "api", 
+        "gh",
+        "api",
         f"repos/{repository}/git/refs/heads/{base_ref}",
         "--jq",
-        ".object.sha"
+        ".object.sha",
     ]
-    
+
     main_sha = run_gh_api_command(main_sha_cmd)
-    
+
     if not main_sha:
-        warning(f"  Could not get main branch SHA, assuming changes exist")
+        warning("  Could not get main branch SHA, assuming changes exist")
         return True
-    
+
     debug(f"  Main branch SHA: {main_sha}")
-    
+
     # Compare the diff between main and before_sha
     before_diff_cmd = [
         "gh",
         "api",
         f"repos/{repository}/compare/{main_sha}...{before_sha}",
         "--jq",
-        ".files[].filename"
+        ".files[].filename",
     ]
-    
+
     # Compare the diff between main and after_sha
     after_diff_cmd = [
         "gh",
         "api",
         f"repos/{repository}/compare/{main_sha}...{after_sha}",
         "--jq",
-        ".files[].filename"
+        ".files[].filename",
     ]
-    
+
     before_files = run_gh_api_command(before_diff_cmd)
     after_files = run_gh_api_command(after_diff_cmd)
-    
+
     # If either call failed, assume changes exist as a precaution
     if before_files is None or after_files is None:
         warning("  GitHub API call failed, assuming changes exist as a precaution")
         return True
-    
+
     # Convert to sets for comparison
     before_set = set(before_files.splitlines() if before_files else [])
     after_set = set(after_files.splitlines() if after_files else [])
-    
+
     debug(f"  Files changed in before commit: {len(before_set)}")
     debug(f"  Files changed in after commit: {len(after_set)}")
-    
+
     # If the sets are different, there are changes
     if before_set != after_set:
         info("  Changes detected - different files modified compared to main branch")
@@ -364,7 +313,7 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         if removed:
             debug(f"  Files only in before commit: {removed}")
         return True
-    
+
     # Even if the same files are affected, check the content changes
     # Get detailed diffs to compare actual content changes
     before_diff_details_cmd = [
@@ -372,44 +321,47 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         "api",
         f"repos/{repository}/compare/{main_sha}...{before_sha}",
         "--jq",
-        ".files[].patch"
+        ".files[].patch",
     ]
-    
+
     after_diff_details_cmd = [
         "gh",
         "api",
         f"repos/{repository}/compare/{main_sha}...{after_sha}",
         "--jq",
-        ".files[].patch"
+        ".files[].patch",
     ]
-    
+
     before_diff_details = run_gh_api_command(before_diff_details_cmd)
     after_diff_details = run_gh_api_command(after_diff_details_cmd)
-    
+
     # If either call failed, assume changes exist as a precaution
     if before_diff_details is None or after_diff_details is None:
-        warning("  GitHub API call failed when checking diff details, assuming changes exist")
+        warning(
+            "  GitHub API call failed when checking diff details, assuming changes exist"
+        )
         return True
-    
+
     # If the diffs are identical, no changes
-    if before_diff_details == after_diff_details:
+    if get_normalized_hash(before_diff_details) == get_normalized_hash(
+        after_diff_details
+    ):
         info("  No changes detected - identical diffs compared to main branch")
         return False
-    
+
     info("  Changes detected - different diff content compared to main branch")
     return True
 
 
-def parse_repository(repo_string: str) -> Optional[Tuple[str, str]]:
+def parse_repository(repo_string: str) -> tuple[str, str] | None:
     """Parse repository string in format 'owner/repo'"""
     parts = repo_string.split("/", 1)
     if len(parts) == 2 and parts[0] and parts[1]:
         return parts[0], parts[1]
     error(f"Invalid repository format: {repo_string}")
-    return None
 
 
-def parse_exempt_actors(actors_string: str) -> Set[str]:
+def parse_exempt_actors(actors_string: str) -> set[str]:
     """Parse comma-separated list of exempt actors"""
     if not actors_string:
         return set()
