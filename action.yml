@@ -48,16 +48,16 @@ runs:
     # Step 3 removed: No need to checkout the action repository
     # When an action is referenced, its files are available directly
 
-    # Step 4: Set up Python environment
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    # Step 4: Set up Python environment with uv
+    - name: Set up Python with uv
+      uses: astral-sh/setup-uv@v4
       with:
         python-version: '3.12'
 
-    # Step 5: Install Python dependencies directly
+    # Step 5: Install Python dependencies
     - name: Install dependencies
       shell: bash
-      run: pip install httpx==0.28.1 click==8.1.8
+      run: uv pip install --system httpx==0.28.1 click==8.1.8
 
     # Step 6: Execute the smart dismissal script
     - name: Check Conditions and Dismiss Approvals

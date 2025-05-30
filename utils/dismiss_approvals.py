@@ -18,8 +18,9 @@ GITHUB_API_VERSION = "2022-11-28"
 USER_AGENT = "GitHub-Action-Smart-Approval-Dismissal/1.3"
 EXIT_SUCCESS = 0
 EXIT_FAILURE = 1
-GIT_DIFF_NO_CHANGES = 0
-GIT_DIFF_HAS_CHANGES = 1
+MAX_PAGES = 20
+PER_PAGE = 100
+API_TIMEOUT = 30.0
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -28,8 +29,7 @@ logger.addHandler(handler)
 logger.propagate = False
 
 
-# Configure GitHub Actions workflow commands in log messages
-def log_gh_command(level, message):
+def log_gh_command(level: int, message: str) -> None:
     """Format log messages with GitHub Actions command syntax when appropriate"""
     prefix = ""
     if level == logging.DEBUG:
@@ -42,22 +42,21 @@ def log_gh_command(level, message):
     print(f"{prefix}{message}")
 
 
-# Custom log methods that use GitHub Actions format
-def debug(msg):
+def debug(msg: str) -> None:
     if logger.level <= logging.DEBUG:
         log_gh_command(logging.DEBUG, msg)
 
 
-def info(msg):
+def info(msg: str) -> None:
     if logger.level <= logging.INFO:
         print(msg)  # No prefix for better readability
 
 
-def warning(msg):
+def warning(msg: str) -> None:
     log_gh_command(logging.WARNING, msg)
 
 
-def error(msg):
+def error(msg: str) -> None:
     log_gh_command(logging.ERROR, msg)
 
 
@@ -90,7 +89,7 @@ class GitHubClient:
             "X-GitHub-Api-Version": GITHUB_API_VERSION,
             "User-Agent": USER_AGENT,
         }
-        return httpx.Client(headers=headers, timeout=30.0)
+        return httpx.Client(headers=headers, timeout=API_TIMEOUT)
 
     def _api_request(self, method: str, endpoint: str, **kwargs: Any) -> httpx.Response:
         """Make an API request and handle errors consistently"""
@@ -113,48 +112,49 @@ class GitHubClient:
             error(f"API Error: {method} {url} - {e}")
             raise
 
-    def get_approved_reviews(self) -> list[int]:
-        """Fetch all approved reviews for the PR"""
+    def get_approved_reviews(self) -> dict[int, str]:
+        """Fetch all approved reviews for the PR
+
+        Returns:
+            dict: mapping review ID to reviewer login
+        """
         endpoint = f"/repos/{self.owner}/{self.repo}/pulls/{self.pr_number}/reviews"
         info(f"Fetching approved reviews for PR #{self.pr_number}...")
 
-        approved_ids = []
+        reviewers = {}  # Map review_id -> reviewer_login
         page = 1
-        max_pages = 20  # Safety limit
 
-        while page <= max_pages:
+        while page <= MAX_PAGES:
             try:
                 response = self._api_request(
-                    "GET", endpoint, params={"page": page, "per_page": 100}
+                    "GET", endpoint, params={"page": page, "per_page": PER_PAGE}
                 )
                 reviews = response.json()
 
                 if not reviews:
                     break
 
-                # Extract approved review IDs
+                # Extract approved review IDs and reviewers
                 for review in reviews:
                     if review.get("state") == "APPROVED":
                         review_id = review.get("id")
                         reviewer = review.get("user", {}).get("login", "Unknown")
                         if review_id:
-                            approved_ids.append(review_id)
+                            reviewers[review_id] = reviewer
                             info(f"  Found approval: ID {review_id} by {reviewer}")
                         else:
                             warning(f"  Found approval by {reviewer} but missing ID")
 
                 # Check if we've reached the last page
-                if len(reviews) < 100:
+                if len(reviews) < PER_PAGE:
                     break
 
                 page += 1
-
             except httpx.HTTPError:
                 error("Failed to fetch reviews")
-                return []
+                return {}
 
-        # Don't close the client here - it's needed for dismiss_review
-        return list(set(approved_ids))  # Remove any duplicates
+        return reviewers
 
     def dismiss_review(self, review_id: int) -> bool:
         """Dismiss a specific review"""
@@ -166,14 +166,13 @@ class GitHubClient:
         try:
             self._api_request("PUT", endpoint, json=payload)
             info(f"  Successfully dismissed review {review_id}")
-            return True
+
         except httpx.HTTPStatusError as e:
             # Some failures are expected (e.g., already dismissed)
             if e.response.status_code in [404, 422]:
                 warning(
                     f"  Review {review_id}: Already handled (Status {e.response.status_code})"
                 )
-                return True
             else:
                 error(f"  Failed to dismiss review {review_id}")
                 return False
@@ -181,12 +180,42 @@ class GitHubClient:
             error(f"  Failed to dismiss review {review_id}")
             return False
 
+        return True
+
+    def request_reviews(self, reviewers: list[str]) -> bool:
+        """Request reviews from multiple users"""
+        if not reviewers:
+            return True
+
+        endpoint = f"/repos/{self.owner}/{self.repo}/pulls/{self.pr_number}/requested_reviewers"
+        payload = {"reviewers": reviewers}
+
+        reviewer_list = ", ".join(reviewers)
+        info(f"Requesting reviews from: {reviewer_list}")
+
+        try:
+            self._api_request("POST", endpoint, json=payload)
+            info(f"  Successfully requested reviews from {len(reviewers)} reviewer(s)")
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 422:
+                # Some users might already be requested reviewers or can't be requested
+                warning("  Some reviewers cannot be requested (Status 422)")
+            else:
+                error(f"  Failed to request reviews from: {reviewer_list}")
+                return False
+        except httpx.HTTPError:
+            error(f"  Failed to request reviews from: {reviewer_list}")
+            return False
+
+        return True
+
+    def close(self) -> None:
+        """Close the HTTP client"""
+        self.client.close()
+
 
 def run_gh_api_command(cmd: list[str]) -> str | None:
-    """
-    Run a GitHub API command via gh CLI and return the result
-    Returns None if command fails
-    """
+    """Run a GitHub API command via gh CLI and return the result"""
     debug(f"Running command: {' '.join(cmd)}")
 
     try:
@@ -202,29 +231,6 @@ def run_gh_api_command(cmd: list[str]) -> str | None:
         return None
 
 
-def get_comparison_status(
-    repository: str, before_sha: str, after_sha: str
-) -> str | None:
-    """
-    Get the comparison status between two commits
-    Returns status string (identical, behind, ahead, diverged) or None if check fails
-    """
-    status_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{before_sha}...{after_sha}",
-        "--jq",
-        ".status",
-    ]
-
-    status = run_gh_api_command(status_cmd)
-
-    if status:
-        debug(f"  Compare status: '{status}'")
-
-    return status
-
-
 def get_normalized_hash(text: str | None) -> str:
     """Return a SHA-256 hash of the filtered lines, handling None and empty input."""
     if not text:
@@ -238,18 +244,40 @@ def get_normalized_hash(text: str | None) -> str:
     return hasher.hexdigest()
 
 
+def get_file_changes(repository: str, main_sha: str, sha: str) -> set[str]:
+    """Get the set of changed files between main and given SHA"""
+    cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/compare/{main_sha}...{sha}",
+        "--jq",
+        ".files[].filename",
+    ]
+    files = run_gh_api_command(cmd)
+    return set(files.splitlines() if files else [])
+
+
+def get_diff_content(repository: str, main_sha: str, sha: str) -> str | None:
+    """Get the diff content between main and given SHA"""
+    cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/compare/{main_sha}...{sha}",
+        "--jq",
+        ".files[].patch",
+    ]
+    return run_gh_api_command(cmd)
+
+
 def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bool:
-    """
-    Check if there are effective code changes between commits
-    Uses GitHub API via gh CLI to reliably detect changes by comparing deltas with main branch
-    Returns True if changes exist, False otherwise
-    """
+    """Check if there are effective code changes between commits"""
     info("Checking for effective code changes...")
 
-    # Get repository name from environment (always available in GitHub Actions)
     repository = os.environ.get("GITHUB_REPOSITORY")
+    if not repository:
+        warning("  GITHUB_REPOSITORY not set, assuming changes exist")
+        return True
 
-    # Use GitHub API via gh CLI to compare deltas with main branch
     info("  Using GitHub API to compare deltas with main branch")
 
     # Get main branch SHA
@@ -262,90 +290,46 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     ]
 
     main_sha = run_gh_api_command(main_sha_cmd)
-
     if not main_sha:
         warning("  Could not get main branch SHA, assuming changes exist")
         return True
 
     debug(f"  Main branch SHA: {main_sha}")
 
-    # Compare the diff between main and before_sha
-    before_diff_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{main_sha}...{before_sha}",
-        "--jq",
-        ".files[].filename",
-    ]
+    # Get file changes for both commits
+    before_files = get_file_changes(repository, main_sha, before_sha)
+    after_files = get_file_changes(repository, main_sha, after_sha)
 
-    # Compare the diff between main and after_sha
-    after_diff_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{main_sha}...{after_sha}",
-        "--jq",
-        ".files[].filename",
-    ]
-
-    before_files = run_gh_api_command(before_diff_cmd)
-    after_files = run_gh_api_command(after_diff_cmd)
-
-    # If either call failed, assume changes exist as a precaution
     if before_files is None or after_files is None:
         warning("  GitHub API call failed, assuming changes exist as a precaution")
         return True
 
-    # Convert to sets for comparison
-    before_set = set(before_files.splitlines() if before_files else [])
-    after_set = set(after_files.splitlines() if after_files else [])
-
-    debug(f"  Files changed in before commit: {len(before_set)}")
-    debug(f"  Files changed in after commit: {len(after_set)}")
+    debug(f"  Files changed in before commit: {len(before_files)}")
+    debug(f"  Files changed in after commit: {len(after_files)}")
 
     # If the sets are different, there are changes
-    if before_set != after_set:
+    if before_files != after_files:
         info("  Changes detected - different files modified compared to main branch")
-        # Show what's different for debugging
-        added = after_set - before_set
-        removed = before_set - after_set
+        added = after_files - before_files
+        removed = before_files - after_files
         if added:
             debug(f"  New files in after commit: {added}")
         if removed:
             debug(f"  Files only in before commit: {removed}")
         return True
 
-    # Even if the same files are affected, check the content changes
-    # Get detailed diffs to compare actual content changes
-    before_diff_details_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{main_sha}...{before_sha}",
-        "--jq",
-        ".files[].patch",
-    ]
+    # Check content changes if same files are affected
+    before_diff = get_diff_content(repository, main_sha, before_sha)
+    after_diff = get_diff_content(repository, main_sha, after_sha)
 
-    after_diff_details_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{main_sha}...{after_sha}",
-        "--jq",
-        ".files[].patch",
-    ]
-
-    before_diff_details = run_gh_api_command(before_diff_details_cmd)
-    after_diff_details = run_gh_api_command(after_diff_details_cmd)
-
-    # If either call failed, assume changes exist as a precaution
-    if before_diff_details is None or after_diff_details is None:
+    if before_diff is None or after_diff is None:
         warning(
             "  GitHub API call failed when checking diff details, assuming changes exist"
         )
         return True
 
-    # If the diffs are identical, no changes
-    if get_normalized_hash(before_diff_details) == get_normalized_hash(
-        after_diff_details
-    ):
+    # Compare normalized hashes
+    if get_normalized_hash(before_diff) == get_normalized_hash(after_diff):
         info("  No changes detected - identical diffs compared to main branch")
         return False
 
@@ -359,6 +343,7 @@ def parse_repository(repo_string: str) -> tuple[str, str] | None:
     if len(parts) == 2 and parts[0] and parts[1]:
         return parts[0], parts[1]
     error(f"Invalid repository format: {repo_string}")
+    return None
 
 
 def parse_exempt_actors(actors_string: str) -> set[str]:
@@ -368,6 +353,27 @@ def parse_exempt_actors(actors_string: str) -> set[str]:
     return {
         actor.strip().lower() for actor in actors_string.split(",") if actor.strip()
     }
+
+
+def print_summary(
+    approved_count: int,
+    dismissed_count: int,
+    failed_count: int,
+    dismissed_reviewers: set[str],
+    rerequest_succeeded: bool,
+) -> None:
+    """Print operation summary"""
+    info("=== Summary ===")
+    info(f"Total approvals: {approved_count}")
+    info(f"Successfully dismissed: {dismissed_count}")
+    if failed_count:
+        info(f"Failed to dismiss: {failed_count}")
+
+    if dismissed_reviewers:
+        if rerequest_succeeded:
+            info(f"Re-requested reviews: {len(dismissed_reviewers)}")
+        else:
+            info("Failed to re-request reviews")
 
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
@@ -424,21 +430,19 @@ def parse_exempt_actors(actors_string: str) -> set[str]:
 )
 @click.option("--quiet", "-q", is_flag=True, help="Reduce output verbosity")
 def main(
-    github_token,
-    pr_number,
-    dismissal_message,
-    exempt_actors,
-    before_sha,
-    after_sha,
-    base_ref,
-    actor,
-    repository,
-    api_url,
-    quiet,
-):
-    """
-    GitHub Action: Dismisses stale PR approvals based on code changes.
-    """
+    github_token: str,
+    pr_number: int,
+    dismissal_message: str,
+    exempt_actors: str,
+    before_sha: str,
+    after_sha: str,
+    base_ref: str,
+    actor: str,
+    repository: str,
+    api_url: str,
+    quiet: bool,
+) -> None:
+    """GitHub Action: Dismisses stale PR approvals based on code changes."""
     # Set log level based on flags and environment
     if quiet:
         logger.setLevel(logging.WARNING)
@@ -482,55 +486,73 @@ def main(
         api_url=api_url,
     )
 
-    # Get approved reviews
     try:
-        approved_ids = client.get_approved_reviews()
-    except Exception as e:
-        error(f"Failed to get approval reviews: {e}")
-        sys.exit(EXIT_FAILURE)
+        # Get approved reviews
+        reviewers = client.get_approved_reviews()
 
-    if not approved_ids:
-        info("✓ No approvals to dismiss")
-        sys.exit(EXIT_SUCCESS)
+        if not reviewers:
+            info("✓ No approvals to dismiss")
+            sys.exit(EXIT_SUCCESS)
 
-    # Check for effective code changes
-    if not check_for_code_changes(base_ref, before_sha, after_sha):
-        info("✓ No effective code changes, no need to dismiss approvals")
-        sys.exit(EXIT_SUCCESS)
+        # Check for effective code changes
+        if not check_for_code_changes(base_ref, before_sha, after_sha):
+            info("✓ No effective code changes, no need to dismiss approvals")
+            sys.exit(EXIT_SUCCESS)
 
-    # Dismiss reviews
-    info(f"Found {len(approved_ids)} approval(s) to dismiss")
-    info(f"Using dismissal message: '{dismissal_message}'")
+        # Dismiss reviews
+        info(f"Found {len(reviewers)} approval(s) to dismiss")
+        info(f"Using dismissal message: '{dismissal_message}'")
 
-    succeeded = 0
-    failed = 0
+        succeeded = 0
+        failed = 0
+        dismissed_reviewers = set()
 
-    for review_id in approved_ids:
-        try:
-            if client.dismiss_review(review_id):
-                succeeded += 1
-            else:
+        for review_id, reviewer in reviewers.items():
+            try:
+                if client.dismiss_review(review_id):
+                    succeeded += 1
+                    dismissed_reviewers.add(reviewer)
+                else:
+                    failed += 1
+            except Exception as e:
+                error(f"Error dismissing review {review_id}: {e}")
                 failed += 1
-        except Exception as e:
-            error(f"Error dismissing review {review_id}: {e}")
-            failed += 1
 
-    # Clean up resources
-    client.client.close()
+        # Re-request reviews from dismissed reviewers
+        rerequest_succeeded = False
+        if dismissed_reviewers:
+            info(
+                f"Re-requesting reviews from {len(dismissed_reviewers)} reviewer(s)..."
+            )
+            try:
+                rerequest_succeeded = client.request_reviews(list(dismissed_reviewers))
+            except Exception as e:
+                error(f"Error re-requesting reviews: {e}")
+                rerequest_succeeded = False
 
-    # Summary
-    info("=== Summary ===")
-    info(f"Total approvals: {len(approved_ids)}")
-    info(f"Successfully dismissed: {succeeded}")
-    if failed:
-        info(f"Failed to dismiss: {failed}")
+        # Print summary
+        print_summary(
+            len(reviewers),
+            succeeded,
+            failed,
+            dismissed_reviewers,
+            rerequest_succeeded,
+        )
 
-    if failed > 0:
-        error("❌ Action completed with errors")
+        # Determine exit code
+        has_errors = failed > 0 or (dismissed_reviewers and not rerequest_succeeded)
+        if has_errors:
+            error("❌ Action completed with errors")
+            sys.exit(EXIT_FAILURE)
+        else:
+            info("✓ Action completed successfully")
+            sys.exit(EXIT_SUCCESS)
+
+    except Exception as e:
+        error(f"Failed to process PR reviews: {e}")
         sys.exit(EXIT_FAILURE)
-    else:
-        info("✓ Action completed successfully")
-        sys.exit(EXIT_SUCCESS)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":
