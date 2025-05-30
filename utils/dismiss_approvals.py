@@ -429,6 +429,13 @@ def print_summary(
     help="GitHub API URL",
 )
 @click.option("--quiet", "-q", is_flag=True, help="Reduce output verbosity")
+@click.option(
+    "--rerequest-review",
+    envvar="INPUT_REREQUEST_REVIEW",
+    is_flag=True,
+    default=True,
+    help="Re-request review after dismissal",
+)
 def main(
     github_token: str,
     pr_number: int,
@@ -441,6 +448,7 @@ def main(
     repository: str,
     api_url: str,
     quiet: bool,
+    rerequest_review: bool,
 ) -> None:
     """GitHub Action: Dismisses stale PR approvals based on code changes."""
     # Set log level based on flags and environment
@@ -520,7 +528,7 @@ def main(
 
         # Re-request reviews from dismissed reviewers
         rerequest_succeeded = False
-        if dismissed_reviewers:
+        if dismissed_reviewers and rerequest_review:
             info(
                 f"Re-requesting reviews from {len(dismissed_reviewers)} reviewer(s)..."
             )
@@ -540,7 +548,7 @@ def main(
         )
 
         # Determine exit code
-        has_errors = failed > 0 or (dismissed_reviewers and not rerequest_succeeded)
+        has_errors = failed > 0 or (dismissed_reviewers and rerequest_review and not rerequest_succeeded)
         if has_errors:
             error("❌ Action completed with errors")
             sys.exit(EXIT_FAILURE)
