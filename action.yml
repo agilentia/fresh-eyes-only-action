@@ -22,6 +22,10 @@ inputs:
     description: 'The message to use when dismissing the review.'
     required: false
     default: 'Approval dismissed: Changes detected since last approval.'
+  rerequest-review:
+    description: 'Whether to re-request reviews from dismissed reviewers.'
+    required: false
+    default: 'true'
 
 runs:
   using: 'composite'
@@ -48,16 +52,18 @@ runs:
     # Step 3 removed: No need to checkout the action repository
     # When an action is referenced, its files are available directly
 
-    # Step 4: Set up Python environment
-    - name: Set up Python
-      uses: actions/setup-python@v5
+    # Step 4: Set up Python environment with uv
+    - name: Set up Python with uv
+      uses: astral-sh/setup-uv@v4
       with:
         python-version: '3.12'
 
-    # Step 5: Install Python dependencies directly
+    # Step 5: Install Python dependencies with uv
     - name: Install dependencies
       shell: bash
-      run: pip install httpx==0.28.1 click==8.1.8
+      run: |
+        uv venv .venv
+        uv pip install httpx==0.28.1 click==8.1.8
 
     # Step 6: Execute the smart dismissal script
     - name: Check Conditions and Dismiss Approvals
@@ -70,6 +76,7 @@ runs:
         INPUT_PR_NUMBER: ${{ inputs.pr-number }}
         INPUT_DISMISSAL_MESSAGE: ${{ inputs.dismissal-message }}
         INPUT_EXEMPT_ACTORS: ${{ inputs.exempt-actors }}
+        INPUT_REREQUEST_REVIEW: ${{ inputs.rerequest-review }}
 
         # --- Context needed for checks and API calls ---
         GITHUB_EVENT_BEFORE_SHA: ${{ github.event.before }}
@@ -79,5 +86,5 @@ runs:
         GITHUB_REPOSITORY: ${{ github.repository }} # e.g., owner/repo
         GITHUB_API_URL: ${{ github.api_url }}       # Base URL for API calls (handles GHES)
 
-      # Run the script directly from the action's files
-      run: python ${{ github.action_path }}/utils/dismiss_approvals.py
+      # Run the script using the virtual environment
+      run: .venv/bin/python ${{ github.action_path }}/utils/dismiss_approvals.py
