@@ -141,9 +141,9 @@ class GitHubClient:
                         reviewer = review.get("user", {}).get("login", "Unknown")
                         if review_id:
                             reviewers[review_id] = reviewer
-                            info(f"  Found approval: ID {review_id} by {reviewer}")
+                            info(f"Found approval: ID {review_id} by {reviewer}")
                         else:
-                            warning(f"  Found approval by {reviewer} but missing ID")
+                            warning(f"Found approval by {reviewer} but missing ID")
 
                 # Check if we've reached the last page
                 if len(reviews) < PER_PAGE:
@@ -165,19 +165,19 @@ class GitHubClient:
 
         try:
             self._api_request("PUT", endpoint, json=payload)
-            info(f"  Successfully dismissed review {review_id}")
+            info(f"Successfully dismissed review {review_id}")
 
         except httpx.HTTPStatusError as e:
             # Some failures are expected (e.g., already dismissed)
             if e.response.status_code in [404, 422]:
                 warning(
-                    f"  Review {review_id}: Already handled (Status {e.response.status_code})"
+                    f"Review {review_id}: Already handled (Status {e.response.status_code})"
                 )
             else:
-                error(f"  Failed to dismiss review {review_id}")
+                error(f"Failed to dismiss review {review_id}")
                 return False
         except httpx.HTTPError:
-            error(f"  Failed to dismiss review {review_id}")
+            error(f"Failed to dismiss review {review_id}")
             return False
 
         return True
@@ -195,16 +195,16 @@ class GitHubClient:
 
         try:
             self._api_request("POST", endpoint, json=payload)
-            info(f"  Successfully requested reviews from {len(reviewers)} reviewer(s)")
+            info(f"Successfully requested reviews from {len(reviewers)} reviewer(s)")
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 422:
                 # Some users might already be requested reviewers or can't be requested
-                warning("  Some reviewers cannot be requested (Status 422)")
+                warning("Some reviewers cannot be requested (Status 422)")
             else:
-                error(f"  Failed to request reviews from: {reviewer_list}")
+                error(f"Failed to request reviews from: {reviewer_list}")
                 return False
         except httpx.HTTPError:
-            error(f"  Failed to request reviews from: {reviewer_list}")
+            error(f"Failed to request reviews from: {reviewer_list}")
             return False
 
         return True
@@ -224,47 +224,86 @@ def run_gh_api_command(cmd: list[str]) -> str | None:
         if result.returncode == 0:
             return result.stdout.strip()
         else:
-            error(f"  GitHub API error: {result.stderr}")
-            return None
+            error(f"GitHub API error: {result.stderr}")
     except Exception as e:
-        error(f"  Error running GitHub API command: {e}")
-        return None
+        error(f"Error running GitHub API command: {e}")
 
 
 def get_normalized_hash(text: str | None) -> str:
-    """Return a SHA-256 hash of the filtered lines, handling None and empty input."""
+    """Return a SHA-256 hash of only the actual changes, ignoring context and metadata."""
     if not text:
         text = ""  # Treat None or empty as empty string
 
     hasher = hashlib.sha256()
     for line in text.splitlines():
-        # ignore meta like hunk allocation
-        if not line.startswith(("@@", "+++", "---")):
+        # Only include actual change lines (+ and -), ignore context lines and metadata
+        # This accounts for master branch movement that changes context but not actual changes
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---")):
             hasher.update((line + "\n").encode("utf-8"))
     return hasher.hexdigest()
 
 
-def get_file_changes(repository: str, main_sha: str, sha: str) -> set[str]:
-    """Get the set of changed files between main and given SHA"""
+def get_diff_content(repository: str, base_sha: str, commit_sha: str) -> str | None:
+    """Get the diff content between base and commit using GitHub's diff media type"""
     cmd = [
         "gh",
         "api",
-        f"repos/{repository}/compare/{main_sha}...{sha}",
-        "--jq",
-        ".files[].filename",
+        f"repos/{repository}/compare/{base_sha}...{commit_sha}",
+        "--header",
+        "Accept: application/vnd.github.diff",
     ]
-    files = run_gh_api_command(cmd)
-    return set(files.splitlines() if files else [])
+    return run_gh_api_command(cmd)
 
 
-def get_diff_content(repository: str, main_sha: str, sha: str) -> str | None:
-    """Get the diff content between main and given SHA"""
+def extract_feature_branch_changes(
+    repository: str, merge_commit: str, feature_parent: str, master_parent: str
+) -> str | None:
+    """Extract only the feature branch changes from a merge commit, excluding master updates"""
+
+    # Get the merge base between feature and master parents
+    merge_base_cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/compare/{feature_parent}...{master_parent}",
+        "--jq",
+        ".merge_base_commit.sha",
+    ]
+    merge_base = run_gh_api_command(merge_base_cmd)
+
+    if not merge_base:
+        return None
+
+    debug(f"Merge base between feature and master: {merge_base}")
+
+    # Get feature changes: what the feature branch adds compared to the merge base
+    feature_changes = get_diff_content(repository, merge_base, feature_parent)
+
+    return feature_changes
+
+
+def find_common_base_for_comparison(
+    repository: str, before_sha: str, after_sha: str
+) -> str | None:
+    """Find a common base commit for comparing two commits"""
+    # Get the merge base between the two commits
+    merge_base_cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/compare/{before_sha}...{after_sha}",
+        "--jq",
+        ".merge_base_commit.sha",
+    ]
+    return run_gh_api_command(merge_base_cmd)
+
+
+def get_individual_commit_diff(repository: str, commit_sha: str) -> str | None:
+    """Get the diff for an individual commit (what that commit changed)"""
     cmd = [
         "gh",
         "api",
-        f"repos/{repository}/compare/{main_sha}...{sha}",
-        "--jq",
-        ".files[].patch",
+        f"repos/{repository}/commits/{commit_sha}",
+        "--header",
+        "Accept: application/vnd.github.diff",
     ]
     return run_gh_api_command(cmd)
 
@@ -275,65 +314,98 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
 
     repository = os.environ.get("GITHUB_REPOSITORY")
     if not repository:
-        warning("  GITHUB_REPOSITORY not set, assuming changes exist")
+        warning("GITHUB_REPOSITORY not set, assuming changes exist")
         return True
 
-    info("  Using GitHub API to compare deltas with main branch")
-
-    # Get main branch SHA
-    main_sha_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/git/refs/heads/{base_ref}",
-        "--jq",
-        ".object.sha",
-    ]
-
-    main_sha = run_gh_api_command(main_sha_cmd)
-    if not main_sha:
-        warning("  Could not get main branch SHA, assuming changes exist")
-        return True
-
-    debug(f"  Main branch SHA: {main_sha}")
-
-    # Get file changes for both commits
-    before_files = get_file_changes(repository, main_sha, before_sha)
-    after_files = get_file_changes(repository, main_sha, after_sha)
-
-    if before_files is None or after_files is None:
-        warning("  GitHub API call failed, assuming changes exist as a precaution")
-        return True
-
-    debug(f"  Files changed in before commit: {len(before_files)}")
-    debug(f"  Files changed in after commit: {len(after_files)}")
-
-    # If the sets are different, there are changes
-    if before_files != after_files:
-        info("  Changes detected - different files modified compared to main branch")
-        added = after_files - before_files
-        removed = before_files - after_files
-        if added:
-            debug(f"  New files in after commit: {added}")
-        if removed:
-            debug(f"  Files only in before commit: {removed}")
-        return True
-
-    # Check content changes if same files are affected
-    before_diff = get_diff_content(repository, main_sha, before_sha)
-    after_diff = get_diff_content(repository, main_sha, after_sha)
-
-    if before_diff is None or after_diff is None:
-        warning(
-            "  GitHub API call failed when checking diff details, assuming changes exist"
-        )
-        return True
-
-    # Compare normalized hashes
-    if get_normalized_hash(before_diff) == get_normalized_hash(after_diff):
-        info("  No changes detected - identical diffs compared to main branch")
+    # First try direct comparison
+    direct_diff = get_diff_content(repository, before_sha, after_sha)
+    if direct_diff is not None and not direct_diff.strip():
+        info("No changes detected - commits are identical")
         return False
 
-    info("  Changes detected - different diff content compared to main branch")
+    # Check if after_sha is a merge commit and before_sha is one of its parents (clean merge case)
+    info("Checking for clean merge pattern...")
+    parents_cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/commits/{after_sha}",
+        "--jq",
+        ".parents[].sha",
+    ]
+    parents = run_gh_api_command(parents_cmd)
+
+    if parents:
+        parent_shas = parents.strip().split("\n")
+        if len(parent_shas) == 2 and before_sha in parent_shas:
+            # This is a clean merge scenario: after_sha merges before_sha with master
+            info(
+                "Detected clean merge pattern - comparing feature branch contributions..."
+            )
+
+            master_parent = (
+                parent_shas[1] if parent_shas[0] == before_sha else parent_shas[0]
+            )
+
+            debug(f"Feature parent: {before_sha}")
+            debug(f"Master parent: {master_parent}")
+
+            # Extract feature branch changes for both commits
+            before_feature_changes = extract_feature_branch_changes(
+                repository, before_sha, before_sha, master_parent
+            )
+            after_feature_changes = extract_feature_branch_changes(
+                repository, after_sha, before_sha, master_parent
+            )
+
+            if before_feature_changes is None or after_feature_changes is None:
+                warning(
+                    "Could not extract feature branch changes, assuming changes exist"
+                )
+                return True
+
+            # Compare the feature branch contributions
+            before_hash = get_normalized_hash(before_feature_changes)
+            after_hash = get_normalized_hash(after_feature_changes)
+
+            debug(f"Before feature changes hash: {before_hash}")
+            debug(f"After feature changes hash: {after_hash}")
+
+            if before_hash == after_hash:
+                info(
+                    "No changes detected - identical feature branch contributions (clean merge)"
+                )
+                return False
+            else:
+                info("Changes detected - different feature branch contributions")
+                return True
+
+    # Check for text-equivalent commits (rebased, cherry-picked, etc.)
+    info("Checking for text-equivalent commits...")
+
+    # Get the individual commit diffs (what each commit changed)
+    before_diff = get_individual_commit_diff(repository, before_sha)
+    after_diff = get_individual_commit_diff(repository, after_sha)
+
+    if before_diff is None or after_diff is None:
+        warning("Could not get individual commit diffs, using direct comparison")
+        if direct_diff is None:
+            warning("GitHub API call failed, assuming changes exist")
+            return True
+        info("Changes detected - direct diff found")
+        return True
+
+    # Compare the normalized text changes
+    before_hash = get_normalized_hash(before_diff)
+    after_hash = get_normalized_hash(after_diff)
+
+    debug(f"Before commit diff hash: {before_hash}")
+    debug(f"After commit diff hash: {after_hash}")
+
+    if before_hash == after_hash:
+        info("No changes detected - identical text changes (text-equivalent commits)")
+        return False
+
+    info("Changes detected - different text changes")
     return True
 
 
@@ -548,7 +620,9 @@ def main(
         )
 
         # Determine exit code
-        has_errors = failed > 0 or (dismissed_reviewers and rerequest_review and not rerequest_succeeded)
+        has_errors = failed > 0 or (
+            dismissed_reviewers and rerequest_review and not rerequest_succeeded
+        )
         if has_errors:
             error("❌ Action completed with errors")
             sys.exit(EXIT_FAILURE)
@@ -565,3 +639,23 @@ def main(
 
 if __name__ == "__main__":
     main()
+
+    # # test script
+    # # false
+    # check_for_code_changes(
+    #     "master",
+    #     "c401964a74a888d1d9717a5784b7b370fef206db",
+    #     "cb6e9eedcf78a2cc3b20765d8226eaa7b234602f",
+    # )
+    # # false
+    # check_for_code_changes(
+    #     "master",
+    #     "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
+    #     "d4208e056969c41af53cb60d0f6f87f5c97e5226",
+    # )
+    # # true
+    # check_for_code_changes(
+    #     "master",
+    #     "1e2e30388f38beae4fc3596bbe4d5790b9bf2049",
+    #     "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
+    # )
