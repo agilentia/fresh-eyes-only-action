@@ -271,29 +271,13 @@ def extract_feature_branch_changes(
     merge_base = run_gh_api_command(merge_base_cmd)
 
     if not merge_base:
-        return None
+        return
 
     debug(f"Merge base between feature and master: {merge_base}")
 
     # Get feature changes: what the feature branch adds compared to the merge base
     feature_changes = get_diff_content(repository, merge_base, feature_parent)
-
     return feature_changes
-
-
-def find_common_base_for_comparison(
-    repository: str, before_sha: str, after_sha: str
-) -> str | None:
-    """Find a common base commit for comparing two commits"""
-    # Get the merge base between the two commits
-    merge_base_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{before_sha}...{after_sha}",
-        "--jq",
-        ".merge_base_commit.sha",
-    ]
-    return run_gh_api_command(merge_base_cmd)
 
 
 def get_individual_commit_diff(repository: str, commit_sha: str) -> str | None:
@@ -306,6 +290,227 @@ def get_individual_commit_diff(repository: str, commit_sha: str) -> str | None:
         "Accept: application/vnd.github.diff",
     ]
     return run_gh_api_command(cmd)
+
+
+def handle_transitive_clean_merge_case(
+    repository: str, before_sha: str, after_sha: str, parent_shas: list[str]
+) -> bool | None:
+    """Handle the transitive clean merge case where before_sha is an ancestor of a merge parent.
+
+    Returns:
+        bool: True if changes detected, False if no changes, None if unable to determine
+    """
+    if len(parent_shas) != 2:
+        return
+
+    info("Checking for transitive clean merge case...")
+
+    # Check if before_sha is an ancestor of any merge parent
+    for parent_sha in parent_shas:
+        # Check the relationship between before_sha and this parent
+        relationship_cmd = [
+            "gh",
+            "api",
+            f"repos/{repository}/compare/{before_sha}...{parent_sha}",
+            "--jq",
+            ".behind_by, .merge_base_commit.sha",
+        ]
+        relationship_result = run_gh_api_command(relationship_cmd)
+
+        if not relationship_result:
+            continue
+
+        lines = relationship_result.strip().split("\n")
+        if len(lines) >= 2:
+            behind_by = lines[0]
+            merge_base = lines[1]
+
+            debug(
+                f"Before_sha vs parent {parent_sha}: behind_by={behind_by}, merge_base={merge_base}"
+            )
+
+            # If behind_by is 0 and merge_base is before_sha, then before_sha is an ancestor
+            if behind_by == "0" and merge_base == before_sha:
+                info(
+                    "Found transitive relationship - before commit is ancestor of merge parent"
+                )
+
+                # For transitive clean merge, verify this is a clean merge sequence by checking:
+                # 1. Same files are modified
+                # 2. Incremental commit count (merge commits don't add logical changes)
+
+                # Find the other parent (master branch at time of merge)
+                other_parent = (
+                    parent_shas[1] if parent_shas[0] == parent_sha else parent_shas[0]
+                )
+
+                # Find the base for the original approved commit
+                approved_base_cmd = [
+                    "gh",
+                    "api",
+                    f"repos/{repository}/compare/{before_sha}...{other_parent}",
+                    "--jq",
+                    ".merge_base_commit.sha",
+                ]
+                approved_base = run_gh_api_command(approved_base_cmd)
+
+                if not approved_base:
+                    warning(
+                        "Could not find base for approved commit, assuming changes exist"
+                    )
+                    return True
+
+                # Check additions/deletions by summing file changes to confirm clean merge sequence
+                approved_stats_cmd = [
+                    "gh",
+                    "api",
+                    f"repos/{repository}/compare/{approved_base}...{before_sha}",
+                    "--jq",
+                    "(.files | map(.additions) | add), (.files | map(.deletions) | add)",
+                ]
+                merge_stats_cmd = [
+                    "gh",
+                    "api",
+                    f"repos/{repository}/compare/{other_parent}...{after_sha}",
+                    "--jq",
+                    "(.files | map(.additions) | add), (.files | map(.deletions) | add)",
+                ]
+
+                approved_stats = run_gh_api_command(approved_stats_cmd)
+                merge_stats = run_gh_api_command(merge_stats_cmd)
+
+                if approved_stats and merge_stats:
+                    approved_lines = approved_stats.strip().split("\n")
+                    merge_lines = merge_stats.strip().split("\n")
+
+                    if len(approved_lines) >= 2 and len(merge_lines) >= 2:
+                        approved_adds, approved_dels = (
+                            approved_lines[0],
+                            approved_lines[1],
+                        )
+                        merge_adds, merge_dels = merge_lines[0], merge_lines[1]
+
+                        if approved_adds == merge_adds and approved_dels == merge_dels:
+                            info(
+                                f"Transitive clean merge detected - identical stats (+{approved_adds} -{approved_dels})"
+                            )
+                            info(
+                                "No changes detected - clean transitive merge sequence preserves logical PR content"
+                            )
+                            return False
+                        else:
+                            debug(
+                                f"Stats mismatch - approved: +{approved_adds} -{approved_dels}, merge: +{merge_adds} -{merge_dels}"
+                            )
+                            info(
+                                "Changes detected - different line additions/deletions in transitive merge"
+                            )
+                            return True
+
+                warning(
+                    "Could not get stats for transitive merge comparison, assuming changes exist"
+                )
+                return True
+
+
+def handle_clean_merge_case(
+    repository: str, before_sha: str, after_sha: str, parent_shas: list[str]
+) -> bool | None:
+    """Handle the clean merge case where after_sha is a merge commit.
+
+    Returns:
+        bool: True if changes detected, False if no changes, None if unable to determine
+    """
+    if len(parent_shas) != 2:
+        return
+
+    # Check if before_sha is one of the parents (direct clean merge)
+    if before_sha in parent_shas:
+        info("Detected clean merge pattern - comparing feature branch contributions...")
+
+        master_parent = (
+            parent_shas[1] if parent_shas[0] == before_sha else parent_shas[0]
+        )
+
+        debug(f"Feature parent: {before_sha}")
+        debug(f"Master parent: {master_parent}")
+
+        # Extract feature branch changes for both commits
+        before_feature_changes = extract_feature_branch_changes(
+            repository, before_sha, before_sha, master_parent
+        )
+        after_feature_changes = extract_feature_branch_changes(
+            repository, after_sha, before_sha, master_parent
+        )
+
+        if before_feature_changes is None or after_feature_changes is None:
+            warning("Could not extract feature branch changes, assuming changes exist")
+            return True
+
+        # Compare the feature branch contributions
+        before_hash = get_normalized_hash(before_feature_changes)
+        after_hash = get_normalized_hash(after_feature_changes)
+
+        debug(f"Before feature changes hash: {before_hash}")
+        debug(f"After feature changes hash: {after_hash}")
+
+        if before_hash == after_hash:
+            info(
+                "No changes detected - identical feature branch contributions (clean merge)"
+            )
+            return False
+        else:
+            info("Changes detected - different feature branch contributions")
+            return True
+
+    # Handle consecutive merge commits case
+    # Check if before_sha represents the same feature branch content as one of the parents
+    info("Checking for consecutive merge commits case...")
+
+    for parent_sha in parent_shas:
+        # Check if before_sha and parent_sha represent the same feature branch state
+        # by comparing their feature branch contributions
+        other_parent = (
+            parent_shas[1] if parent_shas[0] == parent_sha else parent_shas[0]
+        )
+
+        # Get feature branch changes for before_sha compared to the other parent
+        before_feature_changes = extract_feature_branch_changes(
+            repository, before_sha, before_sha, other_parent
+        )
+
+        # Get feature branch changes for this parent compared to the other parent
+        parent_feature_changes = extract_feature_branch_changes(
+            repository, parent_sha, parent_sha, other_parent
+        )
+
+        if before_feature_changes is None or parent_feature_changes is None:
+            continue
+
+        before_hash = get_normalized_hash(before_feature_changes)
+        parent_hash = get_normalized_hash(parent_feature_changes)
+
+        debug(f"Before feature changes hash: {before_hash}")
+        debug(f"Parent {parent_sha} feature changes hash: {parent_hash}")
+
+        if before_hash == parent_hash:
+            # before_sha and this parent have identical feature contributions
+            # Now check if the merge (after_sha) just combines these identical contributions
+            after_feature_changes = extract_feature_branch_changes(
+                repository, after_sha, parent_sha, other_parent
+            )
+
+            if after_feature_changes is None:
+                continue
+
+            after_hash = get_normalized_hash(after_feature_changes)
+            debug(f"After feature changes hash: {after_hash}")
+
+            if after_hash == before_hash:
+                info(
+                    "No changes detected - consecutive merge with identical feature contributions"
+                )
+                return False
 
 
 def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bool:
@@ -323,7 +528,7 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         info("No changes detected - commits are identical")
         return False
 
-    # Check if after_sha is a merge commit and before_sha is one of its parents (clean merge case)
+    # Check if after_sha is a merge commit (clean merge case)
     info("Checking for clean merge pattern...")
     parents_cmd = [
         "gh",
@@ -336,48 +541,11 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
 
     if parents:
         parent_shas = parents.strip().split("\n")
-        if len(parent_shas) == 2 and before_sha in parent_shas:
-            # This is a clean merge scenario: after_sha merges before_sha with master
-            info(
-                "Detected clean merge pattern - comparing feature branch contributions..."
-            )
-
-            master_parent = (
-                parent_shas[1] if parent_shas[0] == before_sha else parent_shas[0]
-            )
-
-            debug(f"Feature parent: {before_sha}")
-            debug(f"Master parent: {master_parent}")
-
-            # Extract feature branch changes for both commits
-            before_feature_changes = extract_feature_branch_changes(
-                repository, before_sha, before_sha, master_parent
-            )
-            after_feature_changes = extract_feature_branch_changes(
-                repository, after_sha, before_sha, master_parent
-            )
-
-            if before_feature_changes is None or after_feature_changes is None:
-                warning(
-                    "Could not extract feature branch changes, assuming changes exist"
-                )
-                return True
-
-            # Compare the feature branch contributions
-            before_hash = get_normalized_hash(before_feature_changes)
-            after_hash = get_normalized_hash(after_feature_changes)
-
-            debug(f"Before feature changes hash: {before_hash}")
-            debug(f"After feature changes hash: {after_hash}")
-
-            if before_hash == after_hash:
-                info(
-                    "No changes detected - identical feature branch contributions (clean merge)"
-                )
-                return False
-            else:
-                info("Changes detected - different feature branch contributions")
-                return True
+        merge_result = handle_clean_merge_case(
+            repository, before_sha, after_sha, parent_shas
+        )
+        if merge_result is not None:
+            return merge_result
 
     # Check for text-equivalent commits (rebased, cherry-picked, etc.)
     info("Checking for text-equivalent commits...")
@@ -405,6 +573,14 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         info("No changes detected - identical text changes (text-equivalent commits)")
         return False
 
+    # Check for transitive clean merge case (when before_sha is ancestor of merge parent)
+    if parents and len(parent_shas) == 2:
+        transitive_result = handle_transitive_clean_merge_case(
+            repository, before_sha, after_sha, parent_shas
+        )
+        if transitive_result is not None:
+            return transitive_result
+
     info("Changes detected - different text changes")
     return True
 
@@ -415,7 +591,6 @@ def parse_repository(repo_string: str) -> tuple[str, str] | None:
     if len(parts) == 2 and parts[0] and parts[1]:
         return parts[0], parts[1]
     error(f"Invalid repository format: {repo_string}")
-    return None
 
 
 def parse_exempt_actors(actors_string: str) -> set[str]:
@@ -652,6 +827,12 @@ if __name__ == "__main__":
     #     "master",
     #     "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
     #     "d4208e056969c41af53cb60d0f6f87f5c97e5226",
+    # )
+    # # true
+    # check_for_code_changes(
+    #     "master",
+    #     "2545fae103dc7a0eb8e47b9dc084a18ce0809325",
+    #     "989ce3d547671cdace7039eec40a1787d8d377cc",
     # )
     # # true
     # check_for_code_changes(
