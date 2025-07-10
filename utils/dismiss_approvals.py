@@ -513,6 +513,42 @@ def handle_clean_merge_case(
                 return False
 
 
+def get_commit_parents(repository: str, commit_sha: str) -> list[str]:
+    """Get parent SHAs for a commit"""
+    parents_cmd = [
+        "gh",
+        "api",
+        f"repos/{repository}/commits/{commit_sha}",
+        "--jq",
+        ".parents[].sha",
+    ]
+    parents = run_gh_api_command(parents_cmd)
+    return parents.strip().split("\n") if parents else []
+
+
+def get_effective_commit_content(repository: str, commit_sha: str) -> str | None:
+    """Get the effective content changes for a commit.
+    For merge commits, extracts feature branch changes.
+    For regular commits, returns individual commit diff.
+    """
+    parents = get_commit_parents(repository, commit_sha)
+
+    if len(parents) == 2:
+        # Merge commit - extract feature branch changes
+        debug(f"Extracting feature content from merge commit {commit_sha}")
+        for i, parent_sha in enumerate(parents):
+            other_parent = parents[1 - i]
+            feature_changes = extract_feature_branch_changes(
+                repository, commit_sha, parent_sha, other_parent
+            )
+            if feature_changes:
+                return feature_changes
+        return None
+    else:
+        # Regular commit - return individual commit diff
+        return get_individual_commit_diff(repository, commit_sha)
+
+
 def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bool:
     """Check if there are effective code changes between commits"""
     info("Checking for effective code changes...")
@@ -529,59 +565,49 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         return False
 
     # Check if after_sha is a merge commit (clean merge case)
-    info("Checking for clean merge pattern...")
-    parents_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/commits/{after_sha}",
-        "--jq",
-        ".parents[].sha",
-    ]
-    parents = run_gh_api_command(parents_cmd)
-
-    if parents:
-        parent_shas = parents.strip().split("\n")
+    after_parents = get_commit_parents(repository, after_sha)
+    if len(after_parents) == 2:
+        info("Checking for clean merge pattern...")
         merge_result = handle_clean_merge_case(
-            repository, before_sha, after_sha, parent_shas
+            repository, before_sha, after_sha, after_parents
         )
         if merge_result is not None:
             return merge_result
 
-    # Check for text-equivalent commits (rebased, cherry-picked, etc.)
+    # Check for text-equivalent commits by comparing effective content
     info("Checking for text-equivalent commits...")
 
-    # Get the individual commit diffs (what each commit changed)
-    before_diff = get_individual_commit_diff(repository, before_sha)
-    after_diff = get_individual_commit_diff(repository, after_sha)
+    before_content = get_effective_commit_content(repository, before_sha)
+    after_content = get_effective_commit_content(repository, after_sha)
 
-    if before_diff is None or after_diff is None:
-        warning("Could not get individual commit diffs, using direct comparison")
+    if before_content is None or after_content is None:
+        warning("Could not get effective commit content, using direct comparison")
         if direct_diff is None:
             warning("GitHub API call failed, assuming changes exist")
             return True
         info("Changes detected - direct diff found")
         return True
 
-    # Compare the normalized text changes
-    before_hash = get_normalized_hash(before_diff)
-    after_hash = get_normalized_hash(after_diff)
+    # Compare the normalized content changes
+    before_hash = get_normalized_hash(before_content)
+    after_hash = get_normalized_hash(after_content)
 
-    debug(f"Before commit diff hash: {before_hash}")
-    debug(f"After commit diff hash: {after_hash}")
+    debug(f"Before effective content hash: {before_hash}")
+    debug(f"After effective content hash: {after_hash}")
 
     if before_hash == after_hash:
-        info("No changes detected - identical text changes (text-equivalent commits)")
+        info("No changes detected - identical effective content")
         return False
 
     # Check for transitive clean merge case (when before_sha is ancestor of merge parent)
-    if parents and len(parent_shas) == 2:
+    if len(after_parents) == 2:
         transitive_result = handle_transitive_clean_merge_case(
-            repository, before_sha, after_sha, parent_shas
+            repository, before_sha, after_sha, after_parents
         )
         if transitive_result is not None:
             return transitive_result
 
-    info("Changes detected - different text changes")
+    info("Changes detected - different effective content")
     return True
 
 
@@ -815,28 +841,35 @@ def main(
 if __name__ == "__main__":
     main()
 
-    # # test script
-    # # false
-    # check_for_code_changes(
+    # test script
+    # false
+    # assert check_for_code_changes(
     #     "master",
     #     "c401964a74a888d1d9717a5784b7b370fef206db",
     #     "cb6e9eedcf78a2cc3b20765d8226eaa7b234602f",
-    # )
+    # ) is False
     # # false
-    # check_for_code_changes(
+    # assert check_for_code_changes(
     #     "master",
     #     "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
     #     "d4208e056969c41af53cb60d0f6f87f5c97e5226",
-    # )
+    # ) is False
     # # true
-    # check_for_code_changes(
+    # assert check_for_code_changes(
     #     "master",
     #     "2545fae103dc7a0eb8e47b9dc084a18ce0809325",
     #     "989ce3d547671cdace7039eec40a1787d8d377cc",
-    # )
+    # ) is True
     # # true
-    # check_for_code_changes(
+    # assert check_for_code_changes(
     #     "master",
     #     "1e2e30388f38beae4fc3596bbe4d5790b9bf2049",
     #     "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
-    # )
+    # ) is True
+
+    # # false
+    # assert check_for_code_changes(
+    #     "master",
+    #     "1ebadaa10c37f9e59dca4b10196367b61509f66a",
+    #     "07c07c68775da288d6c243161142e3e5de39e54d",
+    # ) is False
