@@ -11,9 +11,6 @@ inputs:
   github-token:
     description: 'GitHub token with pull-requests:write permission.'
     required: true
-  pr-number:
-    description: 'The number of the pull request.'
-    required: true
   exempt-actors:
     description: 'Comma-separated list of GitHub logins whose pushes should NOT trigger dismissal.'
     required: false
@@ -26,31 +23,102 @@ inputs:
     description: 'Whether to re-request reviews from dismissed reviewers.'
     required: false
     default: 'true'
+  # These are only required when used outside the pull-request context
+  pr-number:
+    description: 'The number of the pull request.'
+    required: false
+  base-ref:
+    description: 'Base branch name of the pull request.'
+    required: false
+  before-sha:
+    description: 'SHA before the change.'
+    required: false
+  after-sha:
+    description: 'SHA after the change.'
+    required: false
+  actor:
+    description: 'GitHub actor who pushed the changes.'
+    required: false
+  repository:
+    description: 'The GitHub repository in owner/repo format.'
+    required: false
 
 runs:
   using: 'composite'
   steps:
+    - name: Resolve parameters
+      id: parameters
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+          # Strictly use inputs for dispatch; do NOT fallback to context
+          REPO="${{ inputs.repository }}"
+          PR_NUMBER="${{ inputs.pr-number }}"
+          BASE_REF="${{ inputs.base-ref }}"
+          BEFORE_SHA="${{ inputs.before-sha }}"
+          AFTER_SHA="${{ inputs.after-sha }}"
+          ACTOR="${{ inputs.actor }}"
+
+          missing=()
+          [[ -z "$REPO"       ]] && missing+=("repository")
+          [[ -z "$PR_NUMBER"  ]] && missing+=("pr-number")
+          [[ -z "$BASE_REF"   ]] && missing+=("base-ref")
+          [[ -z "$BEFORE_SHA" ]] && missing+=("before-sha")
+          [[ -z "$AFTER_SHA"  ]] && missing+=("after-sha")
+          [[ -z "$ACTOR"   ]] && missing+=("actor")
+    
+          if (( ${#missing[@]} )); then
+            echo "::error::Missing required inputs for workflow_dispatch: ${missing[*]}"
+            exit 1
+          fi
+        else
+          # PR context (pull_request[synchronize]) only
+          REPO="${{ github.repository }}"
+          PR_NUMBER="${{ github.event.pull_request.number }}"
+          BASE_REF="${{ github.event.pull_request.base.ref }}"
+          BEFORE_SHA="${{ github.event.before }}"
+          AFTER_SHA="${{ github.event.after }}"
+          ACTOR="${{ github.actor }}"
+        fi
+
+        echo "repository=$REPO" >> "$GITHUB_OUTPUT"
+        echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+        echo "base_ref=$BASE_REF" >> "$GITHUB_OUTPUT"
+        echo "before_sha=$BEFORE_SHA" >> "$GITHUB_OUTPUT"
+        echo "after_sha=$AFTER_SHA" >> "$GITHUB_OUTPUT"
+        echo "actor=$ACTOR" >> "$GITHUB_OUTPUT"
+
+    - name: Get PR branch name
+      shell: bash
+      id: pr
+      run: |
+        echo "branch=$(gh api repos/${{ steps.parameters.outputs.repository }}/pulls/${{ steps.parameters.outputs.pr_number }} --jq '.head.ref')" >> "$GITHUB_OUTPUT"
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+
     # Step 1: Checkout the CALLER's repository code for git operations
     # Needs full history for range-diff.
     - name: Checkout Caller Repository Code
       uses: actions/checkout@v4
       with:
         fetch-depth: 0 # Crucial for git diff/range-diff operations
+        repository: ${{ steps.parameters.outputs.repository }}
+        token: ${{ inputs.github-token }}
+        ref: ${{ steps.pr.outputs.branch }}
 
     # Step 2: Ensure base branch history is available (Safety measure)
     # Fetches the specific base ref to ensure range-diff has access to it.
     - name: Fetch Base Branch History
       shell: bash
       run: |
-        echo "Fetching base branch ${{ github.event.pull_request.base.ref }} history..."
-        git fetch origin ${{ github.event.pull_request.base.ref }}:${{ github.event.pull_request.base.ref }}
+        echo "Fetching base branch ${{ steps.parameters.outputs.base_ref }} history..."
+        git fetch origin ${{ steps.parameters.outputs.base_ref }}:${{ steps.parameters.outputs.base_ref }}
       env:
         # Ensure the token used for fetch has read access if repo is private
         # GITHUB_TOKEN usually suffices unless complex permissions are involved
         GITHUB_TOKEN: ${{ inputs.github-token }}
-
-    # Step 3 removed: No need to checkout the action repository
-    # When an action is referenced, its files are available directly
 
     # Step 4: Set up Python environment with uv
     - name: Set up Python with uv
@@ -69,21 +137,18 @@ runs:
     - name: Check Conditions and Dismiss Approvals
       shell: bash
       env:
-        GH_TOKEN: ${{ github.token }}
-
-        # --- Inputs passed directly to script ---
+        GH_TOKEN: ${{ inputs.github-token }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token }}
-        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        INPUT_PR_NUMBER: ${{ steps.parameters.outputs.pr_number }}
         INPUT_DISMISSAL_MESSAGE: ${{ inputs.dismissal-message }}
         INPUT_EXEMPT_ACTORS: ${{ inputs.exempt-actors }}
         INPUT_REREQUEST_REVIEW: ${{ inputs.rerequest-review }}
 
-        # --- Context needed for checks and API calls ---
-        GITHUB_EVENT_BEFORE_SHA: ${{ github.event.before }}
-        GITHUB_EVENT_AFTER_SHA: ${{ github.event.after }}
-        GITHUB_EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
-        GITHUB_ACTOR: ${{ github.actor }}
-        GITHUB_REPOSITORY: ${{ github.repository }} # e.g., owner/repo
+        INPUT_EVENT_BEFORE_SHA: ${{ steps.parameters.outputs.before_sha }}
+        INPUT_EVENT_AFTER_SHA: ${{ steps.parameters.outputs.after_sha }}
+        INPUT_EVENT_BASE_REF: ${{ steps.parameters.outputs.base_ref }}
+        INPUT_ACTOR: ${{ steps.parameters.outputs.actor }}
+        INPUT_REPOSITORY: ${{ steps.parameters.outputs.repository }}
         GITHUB_API_URL: ${{ github.api_url }}       # Base URL for API calls (handles GHES)
 
       # Run the script using the virtual environment
