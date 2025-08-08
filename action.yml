@@ -52,8 +52,8 @@ runs:
       run: |
         set -euo pipefail
 
-        if [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
-          # Strictly use inputs for dispatch; do NOT fallback to context
+        if [[ "${{ github.event_name }}" =~ ^(repository|workflow)_dispatch$ ]]; then
+          # Dispatch mode: use inputs only
           REPO="${{ inputs.repository }}"
           PR_NUMBER="${{ inputs.pr-number }}"
           BASE_REF="${{ inputs.base-ref }}"
@@ -67,14 +67,14 @@ runs:
           [[ -z "$BASE_REF"   ]] && missing+=("base-ref")
           [[ -z "$BEFORE_SHA" ]] && missing+=("before-sha")
           [[ -z "$AFTER_SHA"  ]] && missing+=("after-sha")
-          [[ -z "$ACTOR"   ]] && missing+=("actor")
-    
+          [[ -z "$ACTOR"      ]] && missing+=("actor")
+
           if (( ${#missing[@]} )); then
-            echo "::error::Missing required inputs for workflow_dispatch: ${missing[*]}"
+            echo "::error::Missing required inputs for dispatch: ${missing[*]}"
             exit 1
           fi
         else
-          # PR context (pull_request[synchronize]) only
+          # PR context (e.g., pull_request[synchronize])
           REPO="${{ github.repository }}"
           PR_NUMBER="${{ github.event.pull_request.number }}"
           BASE_REF="${{ github.event.pull_request.base.ref }}"

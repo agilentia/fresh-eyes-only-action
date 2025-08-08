@@ -5,7 +5,7 @@
 This GitHub Action **dismisses stale approvals** on a Pull Request when new commits are pushed.
 It’s designed to ensure that reviewers always approve the latest code changes, preventing merges based on outdated reviews.
 
-It can run automatically when a PR is updated, or be triggered manually with a `workflow_dispatch` event.
+It can run automatically when a PR is updated, or be triggered manually with a `workflow_dispatch` or `repository_dispatch` event.
 
 ## When to use it
 
