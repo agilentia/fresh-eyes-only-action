@@ -553,9 +553,9 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
     """Check if there are effective code changes between commits"""
     info("Checking for effective code changes...")
 
-    repository = os.environ.get("GITHUB_REPOSITORY")
+    repository = os.environ.get("INPUT_REPOSITORY")
     if not repository:
-        warning("GITHUB_REPOSITORY not set, assuming changes exist")
+        warning("INPUT_REPOSITORY not set, assuming changes exist")
         return True
 
     # First try direct comparison
@@ -670,28 +670,28 @@ def print_summary(
 )
 @click.option(
     "--before-sha",
-    envvar="GITHUB_EVENT_BEFORE_SHA",
+    envvar="INPUT_EVENT_BEFORE_SHA",
     required=True,
     help="SHA before push",
 )
 @click.option(
-    "--after-sha", envvar="GITHUB_EVENT_AFTER_SHA", required=True, help="SHA after push"
+    "--after-sha", envvar="INPUT_EVENT_AFTER_SHA", required=True, help="SHA after push"
 )
 @click.option(
     "--base-ref",
-    envvar="GITHUB_EVENT_BASE_REF",
+    envvar="INPUT_EVENT_BASE_REF",
     required=True,
     help="Base branch reference",
 )
 @click.option(
     "--actor",
-    envvar="GITHUB_ACTOR",
+    envvar="INPUT_ACTOR",
     required=True,
     help="GitHub actor who triggered the workflow",
 )
 @click.option(
     "--repository",
-    envvar="GITHUB_REPOSITORY",
+    envvar="INPUT_REPOSITORY",
     required=True,
     help="Repository in format owner/repo",
 )
