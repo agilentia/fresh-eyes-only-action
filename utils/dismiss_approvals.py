@@ -335,6 +335,7 @@ def handle_transitive_clean_merge_case(
                     "Found transitive relationship - before commit is ancestor of merge parent"
                 )
 
+
                 # For transitive clean merge, verify this is a clean merge sequence by checking:
                 # 1. Same files are modified
                 # 2. Incremental commit count (merge commits don't add logical changes)
@@ -840,36 +841,3 @@ def main(
 
 if __name__ == "__main__":
     main()
-
-    # test script
-    # false
-    # assert check_for_code_changes(
-    #     "master",
-    #     "c401964a74a888d1d9717a5784b7b370fef206db",
-    #     "cb6e9eedcf78a2cc3b20765d8226eaa7b234602f",
-    # ) is False
-    # # false
-    # assert check_for_code_changes(
-    #     "master",
-    #     "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
-    #     "d4208e056969c41af53cb60d0f6f87f5c97e5226",
-    # ) is False
-    # # true
-    # assert check_for_code_changes(
-    #     "master",
-    #     "2545fae103dc7a0eb8e47b9dc084a18ce0809325",
-    #     "989ce3d547671cdace7039eec40a1787d8d377cc",
-    # ) is True
-    # # true
-    # assert check_for_code_changes(
-    #     "master",
-    #     "1e2e30388f38beae4fc3596bbe4d5790b9bf2049",
-    #     "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
-    # ) is True
-
-    # # false
-    # assert check_for_code_changes(
-    #     "master",
-    #     "1ebadaa10c37f9e59dca4b10196367b61509f66a",
-    #     "07c07c68775da288d6c243161142e3e5de39e54d",
-    # ) is False
