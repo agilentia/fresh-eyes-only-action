@@ -99,7 +99,7 @@ runs:
         GH_TOKEN: ${{ inputs.github-token }}
 
     - name: Set up Python with uv
-      uses: astral-sh/setup-uv@v4
+      uses: astral-sh/setup-uv@v6
       with:
         python-version: '3.12'
 
@@ -128,3 +128,4 @@ runs:
 
       # Run the script using the virtual environment
       run: .venv/bin/python ${{ github.action_path }}/utils/dismiss_approvals.py
+
