@@ -99,7 +99,7 @@ runs:
       shell: bash
       run: |
         uv venv .venv
-        uv pip install httpx==0.28.1 click==8.1.8
+        uv pip install -r ${{ github.action_path }}/utils/requirements.txt
 
     - name: Check Conditions and Dismiss Approvals
       shell: bash

@@ -22,7 +22,9 @@ EXIT_FAILURE = 1
 MAX_PAGES = 20
 PER_PAGE = 100
 API_TIMEOUT = 30.0
-JQ_STATS_FILTER = "(.files | map(.additions) | add), (.files | map(.deletions) | add)"
+JQ_STATS_FILTER = (
+    "(.files | map(.additions) | add // 0), (.files | map(.deletions) | add // 0)"
+)
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -592,13 +594,17 @@ def check_cumulative_content_changes(
         return True
 
 
-def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bool:
+def check_for_code_changes(
+    before_sha: str, after_sha: str, repository: str = None
+) -> bool:
     """Check if there are effective code changes between commits"""
-    info("Checking for effective code changes...")
+    if repository is None:
+        repository = os.environ.get("INPUT_REPOSITORY")
 
-    repository = os.environ.get("INPUT_REPOSITORY")
+    info(f"Checking for effective code changes in {repository}...")
+
     if not repository:
-        warning("INPUT_REPOSITORY not set, assuming changes exist")
+        warning("Repository not provided, assuming changes exist")
         return True
 
     # First try direct comparison
@@ -760,9 +766,8 @@ def print_summary(
 )
 @click.option("--quiet", "-q", is_flag=True, help="Reduce output verbosity")
 @click.option(
-    "--rerequest-review",
+    "--rerequest-review/--no-rerequest-review",
     envvar="INPUT_REREQUEST_REVIEW",
-    is_flag=True,
     default=True,
     help="Re-request review after dismissal",
 )
@@ -833,7 +838,7 @@ def main(
             sys.exit(EXIT_SUCCESS)
 
         # Check for effective code changes
-        if not check_for_code_changes(base_ref, before_sha, after_sha):
+        if not check_for_code_changes(before_sha, after_sha, repository):
             info("✓ No effective code changes, no need to dismiss approvals")
             sys.exit(EXIT_SUCCESS)
 

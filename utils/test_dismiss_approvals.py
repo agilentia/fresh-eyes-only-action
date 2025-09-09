@@ -182,7 +182,7 @@ class TestCodeChangeDetectionUnit:
         mock_get_diff.return_value = ""
 
         with patch.dict(os.environ, mock_env_repo):
-            result = check_for_code_changes("main", sha, sha)
+            result = check_for_code_changes(sha, sha)
 
         assert result is False
         mock_get_diff.assert_called_once()
@@ -208,7 +208,6 @@ class TestCodeChangeDetectionUnit:
 
         with patch.dict(os.environ, mock_env_repo):
             result = check_for_code_changes(
-                "main",
                 sample_commit_data["before_sha"],
                 sample_commit_data["after_sha"],
             )
@@ -236,7 +235,6 @@ class TestCodeChangeDetectionUnit:
 
         with patch.dict(os.environ, mock_env_repo):
             result = check_for_code_changes(
-                "main",
                 sample_commit_data["before_sha"],
                 sample_commit_data["after_sha"],
             )
@@ -261,7 +259,6 @@ class TestCodeChangeDetectionUnit:
 
         with patch.dict(os.environ, mock_env_repo):
             result = check_for_code_changes(
-                "main",
                 sample_commit_data["before_sha"],
                 sample_commit_data["merge_sha"],
             )
@@ -278,7 +275,6 @@ class TestCodeChangeDetectionUnit:
 
         with patch.dict(os.environ, mock_env_repo):
             result = check_for_code_changes(
-                "main",
                 sample_commit_data["before_sha"],
                 sample_commit_data["after_sha"],
             )
@@ -289,7 +285,6 @@ class TestCodeChangeDetectionUnit:
         """Test behavior when INPUT_REPOSITORY environment variable is missing"""
         with patch.dict(os.environ, {}, clear=True):
             result = check_for_code_changes(
-                "main",
                 sample_commit_data["before_sha"],
                 sample_commit_data["after_sha"],
             )
@@ -309,7 +304,7 @@ class TestCodeChangeDetectionUnit:
         mock_handle_merge.return_value = True  # Merge detected changes
 
         with patch.dict(os.environ, mock_env_repo):
-            result = check_for_code_changes("main", "before", "after")
+            result = check_for_code_changes("before", "after")
 
         assert result is True
 
@@ -336,7 +331,7 @@ class TestParametrizedCodeChanges:
             mock_get_diff.return_value = None  # Simulate API failure
 
         with patch.dict(os.environ, {"INPUT_REPOSITORY": "test/repo"}):
-            result = check_for_code_changes(base_ref, before_sha, after_sha)
+            result = check_for_code_changes(before_sha, after_sha)
 
         assert result == expected
 
@@ -373,9 +368,7 @@ class TestIntegrationWithRealAPIs:
 
         with patch.dict(os.environ, {"INPUT_REPOSITORY": "agilentia/obr-secretaries"}):
             for case in test_cases:
-                result = check_for_code_changes(
-                    case["base_ref"], case["before"], case["after"]
-                )
+                result = check_for_code_changes(case["before"], case["after"])
                 assert result == case["expected"], f"{case['name']} failed"
 
     @pytest.mark.integration
@@ -400,9 +393,7 @@ class TestIntegrationWithRealAPIs:
 
         with patch.dict(os.environ, {"INPUT_REPOSITORY": "agilentia/obr-secretaries"}):
             for case in test_cases:
-                result = check_for_code_changes(
-                    case["base_ref"], case["before"], case["after"]
-                )
+                result = check_for_code_changes(case["before"], case["after"])
                 assert result == case["expected"], f"{case['name']} failed"
 
     @pytest.mark.integration
@@ -413,7 +404,6 @@ class TestIntegrationWithRealAPIs:
         """Test merge commit case with agilentia/obrv2 repository"""
         with patch.dict(os.environ, {"INPUT_REPOSITORY": "agilentia/obrv2"}):
             result = check_for_code_changes(
-                "master",
                 "2124119514487bb9f1718e88ce4ddfeecf2833cd",
                 "fa049d58ec4fa545facafebabe9b95c25d238ebe",
             )
@@ -426,7 +416,6 @@ class TestIntegrationWithRealAPIs:
         """Test squash and force push case with agilentia/obrv2 repository"""
         with patch.dict(os.environ, {"INPUT_REPOSITORY": "agilentia/obrv2"}):
             result = check_for_code_changes(
-                "master",
                 "6df654066744529813affea7649e8ba6a2d96b6e",
                 "dfc3bcfa32ab67c60dc8c4acefff73acbd519e21",
             )
@@ -513,7 +502,7 @@ class TestEdgeCases:
         """Test handling of empty diff content"""
         mock_get_diff.return_value = ""
 
-        result = check_for_code_changes("main", "sha1", "sha2")
+        result = check_for_code_changes("sha1", "sha2")
 
         assert result is False
 
@@ -523,7 +512,7 @@ class TestEdgeCases:
         """Test handling of whitespace-only changes"""
         mock_get_diff.return_value = "   \n\t\n   "
 
-        result = check_for_code_changes("main", "sha1", "sha2")
+        result = check_for_code_changes("sha1", "sha2")
 
         assert result is False
 
