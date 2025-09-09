@@ -90,14 +90,6 @@ runs:
         echo "after_sha=$AFTER_SHA" >> "$GITHUB_OUTPUT"
         echo "actor=$ACTOR" >> "$GITHUB_OUTPUT"
 
-    - name: Get PR branch name
-      shell: bash
-      id: pr
-      run: |
-        echo "branch=$(gh api repos/${{ steps.parameters.outputs.repository }}/pulls/${{ steps.parameters.outputs.pr_number }} --jq '.head.ref')" >> "$GITHUB_OUTPUT"
-      env:
-        GH_TOKEN: ${{ inputs.github-token }}
-
     - name: Set up Python with uv
       uses: astral-sh/setup-uv@v6
       with:

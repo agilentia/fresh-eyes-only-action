@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 
 permissions:
@@ -10,7 +10,7 @@ permissions:
 
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 
@@ -36,7 +36,7 @@ jobs:
     
     - name: Run unit tests
       run: |
-        .venv/bin/python -m pytest -v -k "not integration"
+        .venv/bin/python -m pytest -v -k "not integration" --cov=dismiss_approvals --cov-report=term-missing
 
   lint:
     runs-on: ubuntu-latest

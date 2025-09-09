@@ -22,6 +22,7 @@ EXIT_FAILURE = 1
 MAX_PAGES = 20
 PER_PAGE = 100
 API_TIMEOUT = 30.0
+JQ_STATS_FILTER = "(.files | map(.additions) | add), (.files | map(.deletions) | add)"
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -276,11 +277,14 @@ def get_diff_content(repository: str, base_sha: str, commit_sha: str) -> str | N
 def extract_feature_branch_changes(
     repository: str, merge_commit: str, feature_parent: str, master_parent: str
 ) -> str | None:
-    """Extract only the feature branch changes from a merge commit, excluding master updates"""
+    """Extract feature-branch contributions.
+    - For a regular feature commit: diff(merge_base, feature_parent)
+    - For a merge commit: diff(master_parent, merge_commit)  (net feature effect merged into master)
+    """
 
     # Get the merge base between feature and master parents
     merge_base = gh_api_compare(
-        repository, feature_parent, master_parent, ".merge_base_commit.sha"
+        repository, feature_parent, master_parent, jq_filter=".merge_base_commit.sha"
     )
 
     if not merge_base:
@@ -288,8 +292,14 @@ def extract_feature_branch_changes(
 
     debug(f"Merge base between feature and master: {merge_base}")
 
-    # Get feature changes: what the feature branch adds compared to the merge base
-    feature_changes = get_diff_content(repository, merge_base, feature_parent)
+    # If feature_parent is a merge (two parents), compare master_parent..feature_parent
+    parents = get_commit_parents(repository, feature_parent)
+    if len(parents) == 2:
+        feature_changes = get_diff_content(repository, master_parent, feature_parent)
+    else:
+        # Otherwise, compare merge_base..feature_parent
+        feature_changes = get_diff_content(repository, merge_base, feature_parent)
+
     return feature_changes
 
 
@@ -315,7 +325,10 @@ def handle_transitive_clean_merge_case(
     for parent_sha in parent_shas:
         # Check the relationship between before_sha and this parent
         relationship_result = gh_api_compare(
-            repository, before_sha, parent_sha, ".behind_by, .merge_base_commit.sha"
+            repository,
+            before_sha,
+            parent_sha,
+            jq_filter=".behind_by, .merge_base_commit.sha",
         )
 
         if not relationship_result:
@@ -347,7 +360,10 @@ def handle_transitive_clean_merge_case(
 
                 # Find the base for the original approved commit
                 approved_base = gh_api_compare(
-                    repository, before_sha, other_parent, ".merge_base_commit.sha"
+                    repository,
+                    before_sha,
+                    other_parent,
+                    jq_filter=".merge_base_commit.sha",
                 )
 
                 if not approved_base:
@@ -357,14 +373,11 @@ def handle_transitive_clean_merge_case(
                     return True
 
                 # Check additions/deletions by summing file changes to confirm clean merge sequence
-                jq_stats = (
-                    "(.files | map(.additions) | add), (.files | map(.deletions) | add)"
-                )
                 approved_stats = gh_api_compare(
-                    repository, approved_base, before_sha, jq_stats
+                    repository, approved_base, before_sha, jq_filter=JQ_STATS_FILTER
                 )
                 merge_stats = gh_api_compare(
-                    repository, other_parent, after_sha, jq_stats
+                    repository, other_parent, after_sha, jq_filter=JQ_STATS_FILTER
                 )
 
                 if approved_stats and merge_stats:
@@ -504,7 +517,7 @@ def handle_clean_merge_case(
 def get_commit_parents(repository: str, commit_sha: str) -> list[str]:
     """Get parent SHAs for a commit"""
     parents = gh_api_commit(repository, commit_sha, ".parents[].sha")
-    return parents.strip().split("\n") if parents else []
+    return parents.splitlines() if parents else []
 
 
 def get_effective_commit_content(repository: str, commit_sha: str) -> str | None:
@@ -545,7 +558,7 @@ def check_cumulative_content_changes(
     """
     # Find merge base between the two commits
     merge_base = gh_api_compare(
-        repository, before_sha, after_sha, ".merge_base_commit.sha"
+        repository, before_sha, after_sha, jq_filter=".merge_base_commit.sha"
     )
 
     if not merge_base:

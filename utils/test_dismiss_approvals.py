@@ -35,8 +35,6 @@ def sample_commit_data():
         "before_sha": "before123456",
         "after_sha": "after789012",
         "merge_sha": "merge345678",
-        "parent1": "parent1_sha",
-        "parent2": "parent2_sha",
     }
 
 
@@ -144,6 +142,34 @@ class TestGitHubClientMocked:
         assert len(reviewers) == 2
         assert reviewers[1] == "reviewer1"
         assert reviewers[2] == "reviewer2"
+
+    def test_get_approved_reviews_filters_non_approved(self):
+        """Test that only APPROVED reviews are returned, filtering out other states"""
+        client = GitHubClient(
+            token="test_token",
+            owner="test_owner",
+            repo="test_repo",
+            pr_number=123,
+            dismissal_message="Test message",
+        )
+
+        # Mock the _api_request method with mixed review states
+        mock_response = Mock()
+        mock_response.json.return_value = [
+            {"id": 1, "state": "APPROVED", "user": {"login": "approved_user"}},
+            {"id": 2, "state": "COMMENTED", "user": {"login": "commented_user"}},
+            {"id": 3, "state": "CHANGES_REQUESTED", "user": {"login": "blocked_user"}},
+            {"id": 4, "state": "APPROVED", "user": {"login": "another_approved"}},
+        ]
+
+        with patch.object(client, "_api_request", return_value=mock_response):
+            reviewers = client.get_approved_reviews()
+
+        # Should only contain the APPROVED reviews
+        assert len(reviewers) == 2
+        assert set(reviewers.keys()) == {1, 4}
+        assert reviewers[1] == "approved_user"
+        assert reviewers[4] == "another_approved"
 
 
 class TestCodeChangeDetectionUnit:
@@ -270,6 +296,23 @@ class TestCodeChangeDetectionUnit:
 
         assert result is True  # Fail safe - assume changes
 
+    @patch("dismiss_approvals.get_diff_content")
+    @patch("dismiss_approvals.get_commit_parents")
+    @patch("dismiss_approvals.handle_clean_merge_case")
+    def test_merge_commit_with_manual_changes_triggers_changes(
+        self, mock_handle_merge, mock_get_parents, mock_get_diff, mock_env_repo
+    ):
+        """Test that merge commits with manual changes during conflict resolution are detected"""
+        mock_get_diff.return_value = "merge diff"  # Non-empty to skip early-out
+        mock_get_parents.return_value = ["parent1", "parent2"]  # Merge commit
+        # Simulate merge case that detects changes
+        mock_handle_merge.return_value = True  # Merge detected changes
+
+        with patch.dict(os.environ, mock_env_repo):
+            result = check_for_code_changes("main", "before", "after")
+
+        assert result is True
+
 
 @pytest.mark.parametrize(
     "base_ref,before_sha,after_sha,expected",
@@ -282,8 +325,9 @@ class TestParametrizedCodeChanges:
     """Parametrized tests for various code change scenarios"""
 
     @patch("dismiss_approvals.get_diff_content")
+    @patch("dismiss_approvals.get_commit_parents", return_value=["p"])
     def test_code_change_scenarios(
-        self, mock_get_diff, base_ref, before_sha, after_sha, expected
+        self, mock_get_parents, mock_get_diff, base_ref, before_sha, after_sha, expected
     ):
         """Test various code change detection scenarios"""
         if before_sha == after_sha:
