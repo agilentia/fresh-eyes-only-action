@@ -3,6 +3,7 @@
 GitHub Action: Smart PR Approval Dismissal
 Automatically dismisses stale PR approvals when code changes are detected.
 """
+
 import hashlib
 import logging
 import os
@@ -21,6 +22,9 @@ EXIT_FAILURE = 1
 MAX_PAGES = 20
 PER_PAGE = 100
 API_TIMEOUT = 30.0
+JQ_STATS_FILTER = (
+    "(.files | map(.additions) | add // 0), (.files | map(.deletions) | add // 0)"
+)
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -229,6 +233,30 @@ def run_gh_api_command(cmd: list[str]) -> str | None:
         error(f"Error running GitHub API command: {e}")
 
 
+def gh_api_compare(
+    repository: str, base: str, head: str, jq_filter: str = None, diff: bool = False
+) -> str | None:
+    """Helper to make GitHub API compare calls"""
+    cmd = ["gh", "api", f"repos/{repository}/compare/{base}...{head}"]
+    if diff:
+        cmd.extend(["--header", "Accept: application/vnd.github.diff"])
+    elif jq_filter:
+        cmd.extend(["--jq", jq_filter])
+    return run_gh_api_command(cmd)
+
+
+def gh_api_commit(
+    repository: str, commit_sha: str, jq_filter: str = None, diff: bool = False
+) -> str | None:
+    """Helper to make GitHub API commit calls"""
+    cmd = ["gh", "api", f"repos/{repository}/commits/{commit_sha}"]
+    if diff:
+        cmd.extend(["--header", "Accept: application/vnd.github.diff"])
+    elif jq_filter:
+        cmd.extend(["--jq", jq_filter])
+    return run_gh_api_command(cmd)
+
+
 def get_normalized_hash(text: str | None) -> str:
     """Return a SHA-256 hash of only the actual changes, ignoring context and metadata."""
     if not text:
@@ -245,51 +273,41 @@ def get_normalized_hash(text: str | None) -> str:
 
 def get_diff_content(repository: str, base_sha: str, commit_sha: str) -> str | None:
     """Get the diff content between base and commit using GitHub's diff media type"""
-    cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{base_sha}...{commit_sha}",
-        "--header",
-        "Accept: application/vnd.github.diff",
-    ]
-    return run_gh_api_command(cmd)
+    return gh_api_compare(repository, base_sha, commit_sha, diff=True)
 
 
 def extract_feature_branch_changes(
     repository: str, merge_commit: str, feature_parent: str, master_parent: str
 ) -> str | None:
-    """Extract only the feature branch changes from a merge commit, excluding master updates"""
+    """Extract feature-branch contributions.
+    - For a regular feature commit: diff(merge_base, feature_parent)
+    - For a merge commit: diff(master_parent, merge_commit)  (net feature effect merged into master)
+    """
 
     # Get the merge base between feature and master parents
-    merge_base_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/compare/{feature_parent}...{master_parent}",
-        "--jq",
-        ".merge_base_commit.sha",
-    ]
-    merge_base = run_gh_api_command(merge_base_cmd)
+    merge_base = gh_api_compare(
+        repository, feature_parent, master_parent, jq_filter=".merge_base_commit.sha"
+    )
 
     if not merge_base:
         return
 
     debug(f"Merge base between feature and master: {merge_base}")
 
-    # Get feature changes: what the feature branch adds compared to the merge base
-    feature_changes = get_diff_content(repository, merge_base, feature_parent)
+    # If feature_parent is a merge (two parents), compare master_parent..feature_parent
+    parents = get_commit_parents(repository, feature_parent)
+    if len(parents) == 2:
+        feature_changes = get_diff_content(repository, master_parent, feature_parent)
+    else:
+        # Otherwise, compare merge_base..feature_parent
+        feature_changes = get_diff_content(repository, merge_base, feature_parent)
+
     return feature_changes
 
 
 def get_individual_commit_diff(repository: str, commit_sha: str) -> str | None:
     """Get the diff for an individual commit (what that commit changed)"""
-    cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/commits/{commit_sha}",
-        "--header",
-        "Accept: application/vnd.github.diff",
-    ]
-    return run_gh_api_command(cmd)
+    return gh_api_commit(repository, commit_sha, diff=True)
 
 
 def handle_transitive_clean_merge_case(
@@ -308,14 +326,12 @@ def handle_transitive_clean_merge_case(
     # Check if before_sha is an ancestor of any merge parent
     for parent_sha in parent_shas:
         # Check the relationship between before_sha and this parent
-        relationship_cmd = [
-            "gh",
-            "api",
-            f"repos/{repository}/compare/{before_sha}...{parent_sha}",
-            "--jq",
-            ".behind_by, .merge_base_commit.sha",
-        ]
-        relationship_result = run_gh_api_command(relationship_cmd)
+        relationship_result = gh_api_compare(
+            repository,
+            before_sha,
+            parent_sha,
+            jq_filter=".behind_by, .merge_base_commit.sha",
+        )
 
         if not relationship_result:
             continue
@@ -345,14 +361,12 @@ def handle_transitive_clean_merge_case(
                 )
 
                 # Find the base for the original approved commit
-                approved_base_cmd = [
-                    "gh",
-                    "api",
-                    f"repos/{repository}/compare/{before_sha}...{other_parent}",
-                    "--jq",
-                    ".merge_base_commit.sha",
-                ]
-                approved_base = run_gh_api_command(approved_base_cmd)
+                approved_base = gh_api_compare(
+                    repository,
+                    before_sha,
+                    other_parent,
+                    jq_filter=".merge_base_commit.sha",
+                )
 
                 if not approved_base:
                     warning(
@@ -361,23 +375,12 @@ def handle_transitive_clean_merge_case(
                     return True
 
                 # Check additions/deletions by summing file changes to confirm clean merge sequence
-                approved_stats_cmd = [
-                    "gh",
-                    "api",
-                    f"repos/{repository}/compare/{approved_base}...{before_sha}",
-                    "--jq",
-                    "(.files | map(.additions) | add), (.files | map(.deletions) | add)",
-                ]
-                merge_stats_cmd = [
-                    "gh",
-                    "api",
-                    f"repos/{repository}/compare/{other_parent}...{after_sha}",
-                    "--jq",
-                    "(.files | map(.additions) | add), (.files | map(.deletions) | add)",
-                ]
-
-                approved_stats = run_gh_api_command(approved_stats_cmd)
-                merge_stats = run_gh_api_command(merge_stats_cmd)
+                approved_stats = gh_api_compare(
+                    repository, approved_base, before_sha, jq_filter=JQ_STATS_FILTER
+                )
+                merge_stats = gh_api_compare(
+                    repository, other_parent, after_sha, jq_filter=JQ_STATS_FILTER
+                )
 
                 if approved_stats and merge_stats:
                     approved_lines = approved_stats.strip().split("\n")
@@ -515,15 +518,8 @@ def handle_clean_merge_case(
 
 def get_commit_parents(repository: str, commit_sha: str) -> list[str]:
     """Get parent SHAs for a commit"""
-    parents_cmd = [
-        "gh",
-        "api",
-        f"repos/{repository}/commits/{commit_sha}",
-        "--jq",
-        ".parents[].sha",
-    ]
-    parents = run_gh_api_command(parents_cmd)
-    return parents.strip().split("\n") if parents else []
+    parents = gh_api_commit(repository, commit_sha, ".parents[].sha")
+    return parents.splitlines() if parents else []
 
 
 def get_effective_commit_content(repository: str, commit_sha: str) -> str | None:
@@ -549,13 +545,66 @@ def get_effective_commit_content(repository: str, commit_sha: str) -> str | None
         return get_individual_commit_diff(repository, commit_sha)
 
 
-def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bool:
-    """Check if there are effective code changes between commits"""
-    info("Checking for effective code changes...")
+def check_cumulative_content_changes(
+    repository: str, before_sha: str, after_sha: str
+) -> bool | None:
+    """
+    Check if two single-parent commits represent the same cumulative changes from a common base.
+    This handles squash/rebase scenarios where individual commit diffs are different
+    but the net logical changes are the same.
 
-    repository = os.environ.get("INPUT_REPOSITORY")
+    Returns:
+        False if no logical changes detected (same cumulative effect)
+        True if changes detected
+        None if unable to determine (fallback to other methods)
+    """
+    # Find merge base between the two commits
+    merge_base = gh_api_compare(
+        repository, before_sha, after_sha, jq_filter=".merge_base_commit.sha"
+    )
+
+    if not merge_base:
+        debug("Could not find merge base for cumulative content comparison")
+        return None
+
+    debug(f"Merge base for cumulative comparison: {merge_base}")
+
+    # Get cumulative changes from merge base to each commit
+    before_cumulative = get_diff_content(repository, merge_base, before_sha)
+    after_cumulative = get_diff_content(repository, merge_base, after_sha)
+
+    if before_cumulative is None or after_cumulative is None:
+        debug("Could not get cumulative diff content")
+        return None
+
+    # Compare the normalized cumulative changes
+    before_hash = get_normalized_hash(before_cumulative)
+    after_hash = get_normalized_hash(after_cumulative)
+
+    debug(f"Before cumulative changes hash: {before_hash}")
+    debug(f"After cumulative changes hash: {after_hash}")
+
+    if before_hash == after_hash:
+        info(
+            "No changes detected - identical cumulative changes (squash/rebase scenario)"
+        )
+        return False
+    else:
+        info("Changes detected - different cumulative changes")
+        return True
+
+
+def check_for_code_changes(
+    before_sha: str, after_sha: str, repository: str = None
+) -> bool:
+    """Check if there are effective code changes between commits"""
+    if repository is None:
+        repository = os.environ.get("INPUT_REPOSITORY")
+
+    info(f"Checking for effective code changes in {repository}...")
+
     if not repository:
-        warning("INPUT_REPOSITORY not set, assuming changes exist")
+        warning("Repository not provided, assuming changes exist")
         return True
 
     # First try direct comparison
@@ -574,12 +623,37 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
         if merge_result is not None:
             return merge_result
 
-    # Check for text-equivalent commits by comparing effective content
+    # Check for text-equivalent commits by comparing effective content first
     info("Checking for text-equivalent commits...")
 
     before_content = get_effective_commit_content(repository, before_sha)
     after_content = get_effective_commit_content(repository, after_sha)
 
+    if before_content is not None and after_content is not None:
+        # Compare the normalized content changes
+        before_hash = get_normalized_hash(before_content)
+        after_hash = get_normalized_hash(after_content)
+
+        debug(f"Before effective content hash: {before_hash}")
+        debug(f"After effective content hash: {after_hash}")
+
+        if before_hash == after_hash:
+            info("No changes detected - identical effective content")
+            return False
+
+        # If regular effective content comparison shows differences,
+        # but both are single-parent commits, try cumulative content comparison
+        # This handles squash/rebase scenarios
+        before_parents = get_commit_parents(repository, before_sha)
+        if len(before_parents) == 1 and len(after_parents) == 1:
+            info("Different effective content, checking for squash/rebase scenario...")
+            squash_result = check_cumulative_content_changes(
+                repository, before_sha, after_sha
+            )
+            if squash_result is not None:
+                return squash_result
+
+    # Fallback: Could not get effective commit content
     if before_content is None or after_content is None:
         warning("Could not get effective commit content, using direct comparison")
         if direct_diff is None:
@@ -587,17 +661,6 @@ def check_for_code_changes(base_ref: str, before_sha: str, after_sha: str) -> bo
             return True
         info("Changes detected - direct diff found")
         return True
-
-    # Compare the normalized content changes
-    before_hash = get_normalized_hash(before_content)
-    after_hash = get_normalized_hash(after_content)
-
-    debug(f"Before effective content hash: {before_hash}")
-    debug(f"After effective content hash: {after_hash}")
-
-    if before_hash == after_hash:
-        info("No changes detected - identical effective content")
-        return False
 
     # Check for transitive clean merge case (when before_sha is ancestor of merge parent)
     if len(after_parents) == 2:
@@ -703,9 +766,8 @@ def print_summary(
 )
 @click.option("--quiet", "-q", is_flag=True, help="Reduce output verbosity")
 @click.option(
-    "--rerequest-review",
+    "--rerequest-review/--no-rerequest-review",
     envvar="INPUT_REREQUEST_REVIEW",
-    is_flag=True,
     default=True,
     help="Re-request review after dismissal",
 )
@@ -776,7 +838,7 @@ def main(
             sys.exit(EXIT_SUCCESS)
 
         # Check for effective code changes
-        if not check_for_code_changes(base_ref, before_sha, after_sha):
+        if not check_for_code_changes(before_sha, after_sha, repository):
             info("✓ No effective code changes, no need to dismiss approvals")
             sys.exit(EXIT_SUCCESS)
 
@@ -840,36 +902,3 @@ def main(
 
 if __name__ == "__main__":
     main()
-
-    # test script
-    # false
-    # assert check_for_code_changes(
-    #     "master",
-    #     "c401964a74a888d1d9717a5784b7b370fef206db",
-    #     "cb6e9eedcf78a2cc3b20765d8226eaa7b234602f",
-    # ) is False
-    # # false
-    # assert check_for_code_changes(
-    #     "master",
-    #     "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
-    #     "d4208e056969c41af53cb60d0f6f87f5c97e5226",
-    # ) is False
-    # # true
-    # assert check_for_code_changes(
-    #     "master",
-    #     "2545fae103dc7a0eb8e47b9dc084a18ce0809325",
-    #     "989ce3d547671cdace7039eec40a1787d8d377cc",
-    # ) is True
-    # # true
-    # assert check_for_code_changes(
-    #     "master",
-    #     "1e2e30388f38beae4fc3596bbe4d5790b9bf2049",
-    #     "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
-    # ) is True
-
-    # # false
-    # assert check_for_code_changes(
-    #     "master",
-    #     "1ebadaa10c37f9e59dca4b10196367b61509f66a",
-    #     "07c07c68775da288d6c243161142e3e5de39e54d",
-    # ) is False

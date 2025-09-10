@@ -90,50 +90,17 @@ runs:
         echo "after_sha=$AFTER_SHA" >> "$GITHUB_OUTPUT"
         echo "actor=$ACTOR" >> "$GITHUB_OUTPUT"
 
-    - name: Get PR branch name
-      shell: bash
-      id: pr
-      run: |
-        echo "branch=$(gh api repos/${{ steps.parameters.outputs.repository }}/pulls/${{ steps.parameters.outputs.pr_number }} --jq '.head.ref')" >> "$GITHUB_OUTPUT"
-      env:
-        GH_TOKEN: ${{ inputs.github-token }}
-
-    # Step 1: Checkout the CALLER's repository code for git operations
-    # Needs full history for range-diff.
-    - name: Checkout Caller Repository Code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0 # Crucial for git diff/range-diff operations
-        repository: ${{ steps.parameters.outputs.repository }}
-        token: ${{ inputs.github-token }}
-        ref: ${{ steps.pr.outputs.branch }}
-
-    # Step 2: Ensure base branch history is available (Safety measure)
-    # Fetches the specific base ref to ensure range-diff has access to it.
-    - name: Fetch Base Branch History
-      shell: bash
-      run: |
-        echo "Fetching base branch ${{ steps.parameters.outputs.base_ref }} history..."
-        git fetch origin ${{ steps.parameters.outputs.base_ref }}:${{ steps.parameters.outputs.base_ref }}
-      env:
-        # Ensure the token used for fetch has read access if repo is private
-        # GITHUB_TOKEN usually suffices unless complex permissions are involved
-        GITHUB_TOKEN: ${{ inputs.github-token }}
-
-    # Step 4: Set up Python environment with uv
     - name: Set up Python with uv
-      uses: astral-sh/setup-uv@v4
+      uses: astral-sh/setup-uv@v6
       with:
         python-version: '3.12'
 
-    # Step 5: Install Python dependencies with uv
     - name: Install dependencies
       shell: bash
       run: |
         uv venv .venv
-        uv pip install httpx==0.28.1 click==8.1.8
+        uv pip install -r ${{ github.action_path }}/utils/requirements.txt
 
-    # Step 6: Execute the smart dismissal script
     - name: Check Conditions and Dismiss Approvals
       shell: bash
       env:
@@ -153,3 +120,4 @@ runs:
 
       # Run the script using the virtual environment
       run: .venv/bin/python ${{ github.action_path }}/utils/dismiss_approvals.py
+
