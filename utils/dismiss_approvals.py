@@ -25,6 +25,7 @@ API_TIMEOUT = 30.0
 JQ_STATS_FILTER = (
     "(.files | map(.additions) | add // 0), (.files | map(.deletions) | add // 0)"
 )
+EMPTY_DIFF_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"  # SHA-256 of empty string
 
 # Setup logging
 logger = logging.getLogger(__name__)
@@ -417,9 +418,12 @@ def handle_transitive_clean_merge_case(
 
 
 def handle_clean_merge_case(
-    repository: str, before_sha: str, after_sha: str, parent_shas: list[str]
+    repository: str, before_sha: str, after_sha: str, parent_shas: list[str], direct_diff: str = None
 ) -> bool | None:
     """Handle the clean merge case where after_sha is a merge commit.
+
+    Args:
+        direct_diff: Optional direct comparison diff to check for conflict resolution
 
     Returns:
         bool: True if changes detected, False if no changes, None if unable to determine
@@ -458,13 +462,15 @@ def handle_clean_merge_case(
         debug(f"After feature changes hash: {after_hash}")
 
         if before_hash == after_hash:
-            info(
-                "No changes detected - identical feature branch contributions (clean merge)"
-            )
+            if direct_diff and get_normalized_hash(direct_diff) != EMPTY_DIFF_HASH:
+                info("Merge commit has changes in direct comparison")
+                info("Changes detected - merge brought in changes that need review")
+                return True
+            info("No changes detected - identical feature branch contributions (clean merge)")
             return False
-        else:
-            info("Changes detected - different feature branch contributions")
-            return True
+
+        info("Changes detected - different feature branch contributions")
+        return True
 
     # Handle consecutive merge commits case
     # Check if before_sha represents the same feature branch content as one of the parents
@@ -613,12 +619,24 @@ def check_for_code_changes(
         info("No changes detected - commits are identical")
         return False
 
+    # Check if direct diff has actual code changes
+    direct_has_changes = False
+    if direct_diff is not None:
+        direct_hash = get_normalized_hash(direct_diff)
+        direct_has_changes = direct_hash != EMPTY_DIFF_HASH
+
+        if direct_has_changes:
+            debug(f"Direct comparison shows changes (hash: {direct_hash})")
+        else:
+            info("No changes detected - direct diff has no code changes")
+            return False
+
     # Check if after_sha is a merge commit (clean merge case)
     after_parents = get_commit_parents(repository, after_sha)
     if len(after_parents) == 2:
         info("Checking for clean merge pattern...")
         merge_result = handle_clean_merge_case(
-            repository, before_sha, after_sha, after_parents
+            repository, before_sha, after_sha, after_parents, direct_diff
         )
         if merge_result is not None:
             return merge_result
@@ -630,22 +648,32 @@ def check_for_code_changes(
     after_content = get_effective_commit_content(repository, after_sha)
 
     if before_content is not None and after_content is not None:
-        # Compare the normalized content changes
         before_hash = get_normalized_hash(before_content)
         after_hash = get_normalized_hash(after_content)
 
         debug(f"Before effective content hash: {before_hash}")
         debug(f"After effective content hash: {after_hash}")
 
+        before_parents = get_commit_parents(repository, before_sha)
+        is_single_parent_rebase = len(before_parents) == 1 and len(after_parents) == 1
+
         if before_hash == after_hash:
+            if is_single_parent_rebase and direct_has_changes:
+                commits_between = gh_api_compare(
+                    repository, before_sha, after_sha, jq_filter='[.commits[] | .commit.message] | join("\\n")'
+                )
+
+                if commits_between:
+                    commits_text = commits_between.lower()
+                    if "conflict" in commits_text or "# conflicts:" in commits_text:
+                        info("Commit messages indicate conflicts were resolved")
+                        info("Changes detected - conflict resolution during rebase")
+                        return True
+
             info("No changes detected - identical effective content")
             return False
 
-        # If regular effective content comparison shows differences,
-        # but both are single-parent commits, try cumulative content comparison
-        # This handles squash/rebase scenarios
-        before_parents = get_commit_parents(repository, before_sha)
-        if len(before_parents) == 1 and len(after_parents) == 1:
+        if is_single_parent_rebase:
             info("Different effective content, checking for squash/rebase scenario...")
             squash_result = check_cumulative_content_changes(
                 repository, before_sha, after_sha
