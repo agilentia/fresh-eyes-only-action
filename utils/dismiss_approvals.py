@@ -418,7 +418,11 @@ def handle_transitive_clean_merge_case(
 
 
 def handle_clean_merge_case(
-    repository: str, before_sha: str, after_sha: str, parent_shas: list[str], direct_diff: str = None
+    repository: str,
+    before_sha: str,
+    after_sha: str,
+    parent_shas: list[str],
+    direct_diff: str = None,
 ) -> bool | None:
     """Handle the clean merge case where after_sha is a merge commit.
 
@@ -466,7 +470,9 @@ def handle_clean_merge_case(
                 info("Merge commit has changes in direct comparison")
                 info("Changes detected - merge brought in changes that need review")
                 return True
-            info("No changes detected - identical feature branch contributions (clean merge)")
+            info(
+                "No changes detected - identical feature branch contributions (clean merge)"
+            )
             return False
 
         info("Changes detected - different feature branch contributions")
@@ -660,7 +666,10 @@ def check_for_code_changes(
         if before_hash == after_hash:
             if is_single_parent_rebase and direct_has_changes:
                 commits_between = gh_api_compare(
-                    repository, before_sha, after_sha, jq_filter='[.commits[] | .commit.message] | join("\\n")'
+                    repository,
+                    before_sha,
+                    after_sha,
+                    jq_filter='[.commits[] | .commit.message] | join("\\n")',
                 )
 
                 if commits_between:

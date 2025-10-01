@@ -302,7 +302,12 @@ class TestCodeChangeDetectionUnit:
     @patch("dismiss_approvals.get_commit_parents")
     @patch("dismiss_approvals.handle_clean_merge_case")
     def test_merge_commit_with_manual_changes_triggers_changes(
-        self, mock_handle_merge, mock_get_parents, mock_get_diff, mock_effective_content, mock_env_repo
+        self,
+        mock_handle_merge,
+        mock_get_parents,
+        mock_get_diff,
+        mock_effective_content,
+        mock_env_repo,
     ):
         """Test that merge commits with manual changes during conflict resolution are detected"""
         mock_get_diff.return_value = "+added line\n-removed line"
@@ -421,7 +426,9 @@ class TestIntegrationWithRealAPIs:
                 "ebbb99a55105787c84c96ce558ab0efc3aea9b7d",
                 "9fb58042bb009fbb3ee4742303848ca72f3ef200",
             )
-            assert result is True, "Should detect changes in merge with conflict resolution"
+            assert result is True, (
+                "Should detect changes in merge with conflict resolution"
+            )
 
     @pytest.mark.integration
     @pytest.mark.skip(
