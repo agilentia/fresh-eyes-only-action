@@ -7,6 +7,15 @@ It’s designed to ensure that reviewers always approve the latest code changes,
 
 It can run automatically when a PR is updated, or be triggered manually with a `workflow_dispatch` or `repository_dispatch` event.
 
+In situations when the code does not change, approvals should be preserved. Examples include:
+
+* Simple rebase (For example: rebase a branch into latest `main`)
+* Squash commits
+
+Both rebase+squash at the same time are not supported. What you can do: 
+* squash -> push -> rebase -> push
+* rebase -> push -> squash -> push
+
 ## When to use it
 
 Use this action if you want to:
