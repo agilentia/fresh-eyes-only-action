@@ -214,6 +214,7 @@ class TestCodeChangeDetectionUnit:
 
         assert result is False
 
+    @patch("dismiss_approvals.check_cumulative_content_changes")
     @patch("dismiss_approvals.get_diff_content")
     @patch("dismiss_approvals.get_commit_parents")
     @patch("dismiss_approvals.get_effective_commit_content")
@@ -222,16 +223,18 @@ class TestCodeChangeDetectionUnit:
         mock_effective_content,
         mock_get_parents,
         mock_get_diff,
+        mock_cumulative,
         mock_env_repo,
         sample_commit_data,
     ):
         """Test when commits have different effective content"""
-        mock_get_diff.return_value = "some diff content"
-        mock_get_parents.return_value = ["parent1"]  # Non-merge commit (single parent)
+        mock_get_diff.return_value = "+some change\n-some removal"
+        mock_get_parents.return_value = ["parent1"]
         mock_effective_content.side_effect = [
             "+added line A\n-removed line",
             "+added line B\n-removed different line",
         ]
+        mock_cumulative.return_value = None
 
         with patch.dict(os.environ, mock_env_repo):
             result = check_for_code_changes(
@@ -241,6 +244,7 @@ class TestCodeChangeDetectionUnit:
 
         assert result is True
 
+    @patch("dismiss_approvals.get_effective_commit_content")
     @patch("dismiss_approvals.get_diff_content")
     @patch("dismiss_approvals.get_commit_parents")
     @patch("dismiss_approvals.handle_clean_merge_case")
@@ -249,13 +253,15 @@ class TestCodeChangeDetectionUnit:
         mock_handle_merge,
         mock_get_parents,
         mock_get_diff,
+        mock_effective_content,
         mock_env_repo,
         sample_commit_data,
     ):
         """Test handling of merge commits"""
-        mock_get_diff.return_value = "merge diff"
-        mock_get_parents.return_value = ["parent1", "parent2"]  # Merge commit
+        mock_get_diff.return_value = "+added line\n-removed line"
+        mock_get_parents.return_value = ["parent1", "parent2"]
         mock_handle_merge.return_value = False
+        mock_effective_content.return_value = None
 
         with patch.dict(os.environ, mock_env_repo):
             result = check_for_code_changes(
@@ -291,17 +297,23 @@ class TestCodeChangeDetectionUnit:
 
         assert result is True  # Fail safe - assume changes
 
+    @patch("dismiss_approvals.get_effective_commit_content")
     @patch("dismiss_approvals.get_diff_content")
     @patch("dismiss_approvals.get_commit_parents")
     @patch("dismiss_approvals.handle_clean_merge_case")
     def test_merge_commit_with_manual_changes_triggers_changes(
-        self, mock_handle_merge, mock_get_parents, mock_get_diff, mock_env_repo
+        self,
+        mock_handle_merge,
+        mock_get_parents,
+        mock_get_diff,
+        mock_effective_content,
+        mock_env_repo,
     ):
         """Test that merge commits with manual changes during conflict resolution are detected"""
-        mock_get_diff.return_value = "merge diff"  # Non-empty to skip early-out
-        mock_get_parents.return_value = ["parent1", "parent2"]  # Merge commit
-        # Simulate merge case that detects changes
-        mock_handle_merge.return_value = True  # Merge detected changes
+        mock_get_diff.return_value = "+added line\n-removed line"
+        mock_get_parents.return_value = ["parent1", "parent2"]
+        mock_handle_merge.return_value = True
+        mock_effective_content.return_value = None
 
         with patch.dict(os.environ, mock_env_repo):
             result = check_for_code_changes("before", "after")
@@ -341,21 +353,21 @@ class TestIntegrationWithRealAPIs:
 
     @pytest.mark.integration
     def test_obr_secretaries_clean_merge_cases(self):
-        """Test clean merge cases with obr-secretaries repository"""
+        """Test merge/rebase cases with base changes"""
         test_cases = [
             {
-                "name": "Clean merge case 1",
+                "name": "Clean rebase",
                 "base_ref": "master",
                 "before": "c401964a74a888d1d9717a5784b7b370fef206db",
                 "after": "cb6e9eedcf78a2cc3b20765d8226eaa7b234602f",
                 "expected": False,
             },
             {
-                "name": "Clean merge case 2",
+                "name": "Clean merge",
                 "base_ref": "master",
                 "before": "f1c0e1ba95267ce30ceb49024437c1ca948fb2ba",
                 "after": "d4208e056969c41af53cb60d0f6f87f5c97e5226",
-                "expected": False,
+                "expected": True,
             },
             {
                 "name": "Transitive clean merge",
@@ -395,6 +407,28 @@ class TestIntegrationWithRealAPIs:
             for case in test_cases:
                 result = check_for_code_changes(case["before"], case["after"])
                 assert result == case["expected"], f"{case['name']} failed"
+
+    @pytest.mark.integration
+    def test_obr_secretaries_rebase_with_conflict_resolution(self):
+        """Test rebase with conflict resolution should detect changes - PR 6401"""
+        with patch.dict(os.environ, {"INPUT_REPOSITORY": "agilentia/obr-secretaries"}):
+            result = check_for_code_changes(
+                "3baa6d39032ce7c56935793be05d295acdd7997c",
+                "382e4b352c8a30c254278a63695e59a9b6e6ad4f",
+            )
+            assert result is True, "Should detect changes when conflict resolution"
+
+    @pytest.mark.integration
+    def test_obrv2_merge_with_conflict_resolution(self):
+        """Test merge commit with conflict resolution should detect changes - PR 10920"""
+        with patch.dict(os.environ, {"INPUT_REPOSITORY": "agilentia/obrv2"}):
+            result = check_for_code_changes(
+                "ebbb99a55105787c84c96ce558ab0efc3aea9b7d",
+                "9fb58042bb009fbb3ee4742303848ca72f3ef200",
+            )
+            assert result is True, (
+                "Should detect changes in merge with conflict resolution"
+            )
 
     @pytest.mark.integration
     @pytest.mark.skip(

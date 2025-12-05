@@ -94,12 +94,15 @@ runs:
       uses: astral-sh/setup-uv@v6
       with:
         python-version: '3.12'
+        ignore-empty-workdir: true
+        enable-cache: false
 
     - name: Install dependencies
       shell: bash
+      working-directory: ${{ github.action_path }}/utils
       run: |
-        uv venv .venv
-        uv pip install -r ${{ github.action_path }}/utils/requirements.txt
+        uv venv --python 3.12 .venv
+        uv pip install -r requirements.txt
 
     - name: Check Conditions and Dismiss Approvals
       shell: bash
@@ -118,6 +121,6 @@ runs:
         INPUT_REPOSITORY: ${{ steps.parameters.outputs.repository }}
         GITHUB_API_URL: ${{ github.api_url }}       # Base URL for API calls (handles GHES)
 
-      # Run the script using the virtual environment
-      run: .venv/bin/python ${{ github.action_path }}/utils/dismiss_approvals.py
-
+      # Run the script using the project venv in utils/ (cross-platform)
+      working-directory: ${{ github.action_path }}/utils
+      run: uv run python dismiss_approvals.py
