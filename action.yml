@@ -49,17 +49,32 @@ runs:
     - name: Resolve parameters
       id: parameters
       shell: bash
+      # Pass values via env, never as ${{ }} in the script, to prevent code injection
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        DISPATCH_REPO: ${{ inputs.repository }}
+        DISPATCH_PR_NUMBER: ${{ inputs.pr-number }}
+        DISPATCH_BASE_REF: ${{ inputs.base-ref }}
+        DISPATCH_BEFORE_SHA: ${{ inputs.before-sha }}
+        DISPATCH_AFTER_SHA: ${{ inputs.after-sha }}
+        DISPATCH_ACTOR: ${{ inputs.actor }}
+        EVENT_REPO: ${{ github.repository }}
+        EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+        EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        EVENT_BEFORE_SHA: ${{ github.event.before }}
+        EVENT_AFTER_SHA: ${{ github.event.after }}
+        EVENT_ACTOR: ${{ github.actor }}
       run: |
         set -euo pipefail
 
-        if [[ "${{ github.event_name }}" =~ ^(repository|workflow)_dispatch$ ]]; then
+        if [[ "$EVENT_NAME" =~ ^(repository|workflow)_dispatch$ ]]; then
           # Dispatch mode: use inputs only
-          REPO="${{ inputs.repository }}"
-          PR_NUMBER="${{ inputs.pr-number }}"
-          BASE_REF="${{ inputs.base-ref }}"
-          BEFORE_SHA="${{ inputs.before-sha }}"
-          AFTER_SHA="${{ inputs.after-sha }}"
-          ACTOR="${{ inputs.actor }}"
+          REPO="$DISPATCH_REPO"
+          PR_NUMBER="$DISPATCH_PR_NUMBER"
+          BASE_REF="$DISPATCH_BASE_REF"
+          BEFORE_SHA="$DISPATCH_BEFORE_SHA"
+          AFTER_SHA="$DISPATCH_AFTER_SHA"
+          ACTOR="$DISPATCH_ACTOR"
 
           missing=()
           [[ -z "$REPO"       ]] && missing+=("repository")
@@ -75,12 +90,12 @@ runs:
           fi
         else
           # PR context (e.g., pull_request[synchronize])
-          REPO="${{ github.repository }}"
-          PR_NUMBER="${{ github.event.pull_request.number }}"
-          BASE_REF="${{ github.event.pull_request.base.ref }}"
-          BEFORE_SHA="${{ github.event.before }}"
-          AFTER_SHA="${{ github.event.after }}"
-          ACTOR="${{ github.actor }}"
+          REPO="$EVENT_REPO"
+          PR_NUMBER="$EVENT_PR_NUMBER"
+          BASE_REF="$EVENT_BASE_REF"
+          BEFORE_SHA="$EVENT_BEFORE_SHA"
+          AFTER_SHA="$EVENT_AFTER_SHA"
+          ACTOR="$EVENT_ACTOR"
         fi
 
         echo "repository=$REPO" >> "$GITHUB_OUTPUT"
@@ -91,15 +106,20 @@ runs:
         echo "actor=$ACTOR" >> "$GITHUB_OUTPUT"
 
     - name: Set up Python with uv
-      uses: astral-sh/setup-uv@v6
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         python-version: '3.12'
 
     - name: Install dependencies
       shell: bash
+      # Keep the venv out of the caller's workspace
+      env:
+        VENV_DIR: ${{ runner.temp }}/fresh-eyes-only-venv
       run: |
-        uv venv .venv
-        uv pip install -r ${{ github.action_path }}/utils/requirements.txt
+        set -euo pipefail
+        rm -rf "$VENV_DIR"
+        uv venv "$VENV_DIR"
+        uv pip install --python "$VENV_DIR/bin/python" --require-hashes -r "$GITHUB_ACTION_PATH/utils/requirements.txt"
 
     - name: Check Conditions and Dismiss Approvals
       shell: bash
@@ -118,6 +138,8 @@ runs:
         INPUT_REPOSITORY: ${{ steps.parameters.outputs.repository }}
         GITHUB_API_URL: ${{ github.api_url }}       # Base URL for API calls (handles GHES)
 
+        VENV_DIR: ${{ runner.temp }}/fresh-eyes-only-venv
+
       # Run the script using the virtual environment
-      run: .venv/bin/python ${{ github.action_path }}/utils/dismiss_approvals.py
+      run: '"$VENV_DIR/bin/python" "$GITHUB_ACTION_PATH/utils/dismiss_approvals.py"'
 
