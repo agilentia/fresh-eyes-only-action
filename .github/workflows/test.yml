@@ -23,9 +23,11 @@ jobs:
         working-directory: utils
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
     - name: Install uv
-      uses: astral-sh/setup-uv@v6
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         python-version: '3.12'
     
@@ -46,23 +48,44 @@ jobs:
         working-directory: utils
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
     
     - name: Install uv
-      uses: astral-sh/setup-uv@v6
+      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
       with:
         python-version: '3.12'
     
     - name: Install ruff
       run: |
         uv venv .venv
-        uv pip install ruff
-    
+        uv pip install "$(grep '^ruff==' requirements-dev.txt)"
+
     - name: Run linting
       run: |
         .venv/bin/ruff check .
-    
+
     - name: Check formatting
       run: |
         .venv/bin/ruff format --check .
+
+  # Run the action itself, so a broken install (e.g. a missing hash) fails here, not in every repo
+  smoke:
+    # Only synchronize events have the before/after SHAs that the action needs
+    if: github.event.action == 'synchronize'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Run action with exempt actor
+      uses: ./
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        # The script exits before any API call when the actor is exempt
+        exempt-actors: ${{ github.actor }}
 
